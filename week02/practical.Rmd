@@ -1,0 +1,119 @@
+---
+title: "Practical - Week 2"
+author: "Pierre-Luc"
+date: "2026-02-27"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(AnnotationHub) # to fetch genomes, annotations, etc.
+  library(ensembldb)     # to manipulate ensembl gene annotations
+  library(GenomicRanges) # data structure for genomic ranges 
+  library(epiwraps)      # visualization
+})
+```
+
+```{r}
+ah <- AnnotationHub()
+# query_results <- query(ah, c("Drosophila", "EnsDb"))
+# query_results$rdatadateadded
+# rev(query_results$ah_id)[1]
+ensdb <- ah[["AH119285"]]
+ensdb
+```
+
+# Querying the ensdb object
+
+```{r}
+fly_genes <- genes(ensdb)
+fly_genes
+granges(fly_genes)
+head(fly_genes)
+
+head(fly_genes)
+ENSMUG000234563465
+
+
+fly_txs <- transcripts(ensdb)
+head(fly_txs)
+
+fly_pcg <- fly_genes[fly_genes$gene_biotype=="protein_coding"]
+length(fly_genes)
+length(fly_pcg)
+
+# equivalent:
+fly_pcg <- genes(ensdb, filter=~gene_biotype=="protein_coding")
+length(fly_pcg)
+```
+
+# Doing overlaps
+
+```{r}
+head(fly_genes)
+
+myRegion <- GRanges("2L", IRanges(50000, 59000))
+myRegion <- as("2L:50000-59000", "GRanges")
+myRegion
+
+
+fly_genes[which(overlapsAny(fly_genes, myRegion))]
+
+
+myRegions <- as(c("2L:50000-59000", "2L:80000-99000"), "GRanges")
+fly_genes[which(overlapsAny(fly_genes, myRegions))]
+
+o <- findOverlaps(myRegions, fly_genes)
+head(o)
+
+split(fly_genes[to(o)], from(o))
+split(fly_genes[subjectHits(o)], queryHits(o))
+?findOverlaps
+
+# we could save the name of the overlapping genes in the myRegions object, for instance:
+myRegions$overlappingGenes <- NA
+overlapGenesPerRegion <- splitAsList(fly_genes$gene_name[subjectHits(o)], queryHits(o))
+myRegions$overlappingGenes[as.integer(names(overlapGenesPerRegion))] <- overlapGenesPerRegion
+
+myRegions
+```
+
+Another common task is to, rather than find direct overlaps, find the nearest gene to my region of interest: 
+
+```{r}
+d <- distanceToNearest(myRegions, fly_genes)
+head(d)
+```
+
+# GRangesList objects:
+
+When querying exons, it's typically more convenient to group them by transcript:
+
+```{r}
+fly_exons <- exons(ensdb)
+head(fly_exons)
+
+fly_exons <- exonsBy(ensdb)
+fly_exons[head(which(lengths(fly_exons)>1))]
+
+width(fly_genes)
+
+head(width(fly_exons))
+```
+
+We can visualize gene models (and any other object with genomic coordinates) in a genome-browser fashion with the following function:
+
+```{r}
+?plotSignalTracks
+plotSignalTracks(files=list(myRegions=myRegions), region="Cda5", ensdb = ensdb)
+# when supplying an ensdb object, we can ask to look at a gene (e.g. Cda5), but otherwise we give in the genomic coordinates, either as GRanges object or as string (e.g. "2L:13513712-13519712" )
+
+
+# By default the different transcripts of a gene are collapsed together, we can see them in this way:
+plotSignalTracks(files=list(myRegions=myRegions), region="Cda5", ensdb = ensdb, transcripts="full")
+```
+
+
+
+
+
