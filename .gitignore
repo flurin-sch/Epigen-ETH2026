@@ -1,0 +1,5 @@
+**/*.Rhistory
+
+# specific files
+**/*.html
+!**/assignment.html
