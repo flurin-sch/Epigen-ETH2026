@@ -32,7 +32,7 @@ granges(fly_genes)
 head(fly_genes)
 
 head(fly_genes)
-ENSMUG000234563465
+# ENSMUG000234563465
 
 
 fly_txs <- transcripts(ensdb)
@@ -55,14 +55,35 @@ head(fly_genes)
 myRegion <- GRanges("2L", IRanges(50000, 59000))
 myRegion <- as("2L:50000-59000", "GRanges")
 myRegion
+```
 
+This section is showing you two different ways to define a specific "address" on the genome using the GenomicRanges package.
 
+**Method 1: The Formal Constructor**
+`myRegion <- GRanges("2L", IRanges(50000, 59000))`
+This uses the explicit function calls. You tell R the chromosome name (seqnames) is "2L" and the start/end coordinates (ranges) are 50,000 to 59,000 via an IRanges object.
+
+**Method 2: The "UCSC Style" Shorthand**
+`myRegion <- as("2L:50000-59000", "GRanges")`
+It takes a standard genomic string (the kind you'd copy-paste from a genome browser) and "coerces" (converts) it into a formal GRanges object. 
+
+- seqnames (2L): This is the chromosome. In Drosophila, "2L" stands for the left arm of chromosome 2.
+- ranges (50000-59000): The specific span of DNA you are looking at.
+- strand (*): The asterisk is a wildcard. It means "unstranded" or "we don't care which strand the data is on." Since you didn't specify + or -, Bioconductor defaults to this.
+- seqinfo: This tells you R doesn't yet know how long the chromosomes are or which genome build (e.g., dm6) this belongs to, because it was created manually rather than pulled from a database
+
+```{r}
 fly_genes[which(overlapsAny(fly_genes, myRegion))]
 
 
 myRegions <- as(c("2L:50000-59000", "2L:80000-99000"), "GRanges")
 fly_genes[which(overlapsAny(fly_genes, myRegions))]
+```
 
+`overlapsAny()` compares to GRanges objects and returns a logical vector that is the exact same length as `fly_genes`.
+We use this vector to subset the `fly_genes` object. 
+
+```{r}
 o <- findOverlaps(myRegions, fly_genes)
 head(o)
 
@@ -77,6 +98,32 @@ myRegions$overlappingGenes[as.integer(names(overlapGenesPerRegion))] <- overlapG
 
 myRegions
 ```
+
+1. Generating the Map: findOverlaps
+
+The command o <- findOverlaps(myRegions, fly_genes) creates a Hits object. Think of this as a two-column lookup table (a "bridge") that connects the indices of your query to the indices of your subject.
+- Query (myRegions): The regions you defined (there are 2 of them).
+- Subject (fly_genes): The database of all fly genes (24,278 genes).
+
+2. Decoding the Hits Output
+
+The head(o) output tells you exactly which region hits which gene:
+- queryHits: The index of the range in myRegions.
+- subjectHits: The index of the gene in fly_genes.
+
+For example, row [1] shows that Region 1 overlaps with Gene 26. Rows [1], [2], and [3] all show a queryHits of 1, meaning Region 1 actually overlaps three different genes (indices 26, 28, and 29).
+
+3. The "Split" Magic
+
+The line split(fly_genes[to(o)], from(o)) is a concise way to reorganize your data into a GRangesList.
+- to(o): This is a helper function that extracts the subjectHits (the gene indices).
+- fly_genes[to(o)]: This subsets the gene list to only include those that had a hit. Since Region 1 had 3 hits, the genes at indices 26, 28, and 29 are pulled out first.
+- from(o): This extracts the queryHits (the region indices).
+- split(..., from(o)): This tells R: "Take that list of overlapping genes and group them based on which region they belong to".
+
+The Result: As seen in your output, you get a list with two entries:
+- $1: Contains the 3 genes (Cda5, jockey{}277, and lncRNA:CR46254) found in your first region.
+- $2: Contains the 2 genes (net and Zir) found in your second region.
 
 Another common task is to, rather than find direct overlaps, find the nearest gene to my region of interest: 
 
@@ -93,19 +140,32 @@ When querying exons, it's typically more convenient to group them by transcript:
 fly_exons <- exons(ensdb)
 head(fly_exons)
 
+# The exonsBy command groups the exons by transcript or potentially another argument
 fly_exons <- exonsBy(ensdb)
 fly_exons[head(which(lengths(fly_exons)>1))]
 
-width(fly_genes)
+# This will show the gene length for all 24'000 genes, I only want to show the first few
+head(width(fly_genes))
 
 head(width(fly_exons))
+
+# This pulls the first 5 transcripts that have more than one exon
+complex_transcripts <- fly_exons[which(lengths(fly_exons) > 1)][1:5]
+width(complex_transcripts)
 ```
 
 We can visualize gene models (and any other object with genomic coordinates) in a genome-browser fashion with the following function:
 
-```{r}
+```{r, fig.width=12, fig.height=4, out.width="100%"}
 ?plotSignalTracks
 plotSignalTracks(files=list(myRegions=myRegions), region="Cda5", ensdb = ensdb)
+```
+
+- files=list(myRegions=myRegions): This tells the function which data tracks to display at the top. You are providing your GRanges object (myRegions) and labeling it as "myRegions" for the plot.
+- region="Cda5": This is the "camera" focus. Instead of typing in coordinates like 2L:25000-65000, you are telling the function to automatically find the coordinates of the gene Cda5 and center the plot there.
+- ensdb = ensdb: This provides the "map". It uses the Ensembl database you loaded earlier to draw the gene models (the boxes and lines) shown in the bottom half of the image.
+
+```{r}
 # when supplying an ensdb object, we can ask to look at a gene (e.g. Cda5), but otherwise we give in the genomic coordinates, either as GRanges object or as string (e.g. "2L:13513712-13519712" )
 
 
@@ -113,7 +173,9 @@ plotSignalTracks(files=list(myRegions=myRegions), region="Cda5", ensdb = ensdb)
 plotSignalTracks(files=list(myRegions=myRegions), region="Cda5", ensdb = ensdb, transcripts="full")
 ```
 
+This visualization displays the genomic architecture of the Chitin deacetylase-like 5 (Cda5) locus on chromosome 2L, generated via plotSignalTracks. The plot contrasts a custom region of interest against the annotated fly genome:
 
-
-
-
+- Experimental Track (myRegions): The blue track represents the manually defined GRanges object (coordinates 2L:50000-59000). It is positioned over the 3' distal end of the Cda5 gene and encompasses the entire transposable element jockey{}277.
+- Transcriptional Complexity: By setting transcripts="full", the plot reveals extensive alternative splicing within Cda5. While the 5' exons (left side) are relatively conserved across isoforms, significant variation is visible in the middle and 3' exons, likely giving rise to diverse protein products with varying chitin-binding or catalytic properties.
+- Directionality: The arrows on the intronic lines indicate that Cda5 is encoded on the negative strand, while neighboring features like jockey{}277 and lncRNA:CR46254 are on the positive strand.
+- Proximity and Overlap: The overlap analysis confirms that myRegions intersects several distinct biotypes, including protein-coding exons, a transposable element, and a long non-coding RNA (lncRNA).
