@@ -1,0 +1,140 @@
+---
+title: "Assignment - Week 02"
+author: "Flurin Schindele"
+date: "2026-02-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r import-packages}
+suppressPackageStartupMessages({
+  library(AnnotationHub) # to fetch genomes, annotations, etc.
+  library(ensembldb)     # to manipulate ensembl gene annotations
+  library(GenomicRanges) # data structure for genomic ranges
+  library(epiwraps)      # visualization
+})
+```
+
+## Finding annotation data using `AnnotationHub`
+
+```{r query-mouse-ensdb}
+ah <- AnnotationHub()
+
+query_results <- query(ah, c("Mus Musculus", "GRCm38", "102", "EnsDB"))
+query_results
+
+mm_ensdb <- ah[[rev(query_results$ah_id)[1]]]
+mm_ensdb <- ah[["AH89211"]]
+mm_ensdb
+```
+
+```{r query-mouse-genome}
+query_results <- query(ah, c("Mus Musculus", "GRCm38", "dna_sm", "2bit"))
+mcols(query_results)[, c("title", "genome", "rdatadateadded")]
+```
+
+This way we have 19 records and there is no clear difference other than the release date. Maybe querying for the version number (102) narrows it down.
+
+Now we indeed have only one so we will choose this genome sequence.
+
+```{r download-mouse-genome}
+query_results <- query(ah, c("Mus Musculus", "GRCm38", "dna_sm", "2bit", "102"))
+query_results
+
+mm_genseq <- ah[[rev(query_results$ah_id)[1]]]
+mm_genseq
+```
+
+When looking for the drosophila genome sequence there are again multiple entries so we will choose the most recent (using the `tail` function we specify the last entry).
+
+```{r download-drosophila-genome}
+query_results <- query(ah,
+  c("drosophila melanogaster", "BDGP6", "dna_sm", "2bit")
+)
+mcols(query_results)[, c("title", "genome", "rdatadateadded")]
+
+dm_genseq <- ah[[tail(rev(query_results$ah_id)[1])]]
+dm_genseq
+```
+
+## Exploring mouse Ensembl data
+
+First we want to look at protein-coding genes.
+
+```{r filter-protein-coding-genes}
+protein_genes <- genes(mm_ensdb)[
+  genes(mm_ensdb)$gene_biotype == "protein_coding"
+]
+```
+
+There are `r length(unique(protein_genes$gene_id))` gene ids and `r length(unique(protein_genes$symbol))` gene symbols for protein-coding genes in the database.
+Some gene symbols are therefore not unique.
+
+```{r count-gene-ids-symbols}
+head(protein_genes$gene_id)
+length(protein_genes$gene_id)
+length(unique(protein_genes$gene_id))
+
+head(protein_genes$symbol)
+length(protein_genes$symbol)
+length(unique(protein_genes$symbol))
+```
+
+We can now query for all exons that belong to protein-coding genes and group them by transcript.
+By summing the width of the exons we get the length of the spliced transcripts.
+
+```{r compute-spliced-tx-lengths}
+mm_exons <- exonsBy(mm_ensdb,
+  by = "tx",
+  filter = ~gene_biotype == "protein_coding"
+)
+
+head(width(mm_exons))
+protein_tx_spliced_len <- sum(width(mm_exons))
+head(protein_tx_spliced_len)
+```
+
+```{r histogram-tx-len, out.width="75%", fig.align="center"}
+hist(protein_tx_spliced_len,
+  breaks = 50,
+  main = "Distribution of spliced lengths of protein-coding transcripts",
+  xlab = "spliced transcript length in bp)"
+)
+```
+
+```{r longest-transcripts}
+head(sort(protein_tx_spliced_len, decreasing = TRUE), 10)
+```
+
+Few transcripts are very long which skews the distribution and makes the plot not very informative.
+The longest transcript (ENSMUST00000020488) is 123'179 bps long. Interestingly, the last exon - exon 4 - makes up most of the transcript and is 122'802 bps long ([source](https://www.ensembl.org/Mus_musculus/Transcript/Exons?db=core;g=ENSMUSG00000020255;r=10:83196085-83324369;t=ENSMUST00000020488)).
+This can also be seen in the diagram below from the ensembl website. Filled boxes mark translated regions and unfilled boxes show UTRs.
+
+<figure style="text-align: center;">
+  <img src="https://static.ensembl.org/img-tmp/temporary/2026_02_28/NGRWPLWMOFTBeBaIKEAAAeLB.png" style="width: 100%;" />
+  <figcaption>ENSMUST00000020488 transcript structure (source: Ensembl). Filled boxes mark translated regions, unfilled boxes show UTRs.</figcaption>
+</figure>
+
+The coding region is only 558 bps long which seems reasonable.
+
+```{r cds-length-example}
+cds <- cdsBy(mm_ensdb, by = "tx", filter = TxIdFilter("ENSMUST00000020488"))
+sum(width(cds[["ENSMUST00000020488"]]))
+```
+
+In order to visualize the transcript length distribution a bit more reasonably we can perform a log-transform of the data.
+
+```{r log-histogram-tx-len, out.width="75%", fig.align="center"}
+hist(log10(protein_tx_spliced_len),
+  breaks = 50,
+  main = "Distribution of spliced lengths of protein-coding transcripts",
+  xlab = "log10(spliced transcript length in bp)"
+)
+```
+
+```{r sessionInfo}
+sessionInfo()
+```
