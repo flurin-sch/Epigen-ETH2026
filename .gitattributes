@@ -1,0 +1,3 @@
+# Exclude knitted outputs from GitHub language stats and hide by default in diffs
+week*/assignment.html linguist-generated=true
+week*/practical.html linguist-generated=true
