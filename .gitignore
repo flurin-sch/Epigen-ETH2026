@@ -1,5 +1,8 @@
 **/*.Rhistory
 
+# data directories
+**/data/
+
 # specific files
 **/*.html
 !**/assignment.html
