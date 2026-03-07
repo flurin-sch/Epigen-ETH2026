@@ -1,3 +1,7 @@
+# Count .Rmd files as R in GitHub language statistics
+# (RMarkdown is classified as "prose" by Linguist and excluded from stats by default)
+**/*.Rmd linguist-language=R
+
 # Exclude knitted outputs from GitHub language stats and hide by default in diffs
 week*/assignment.html linguist-generated=true
 week*/practical.html linguist-generated=true
