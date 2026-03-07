@@ -14,7 +14,6 @@ suppressPackageStartupMessages({
   library(epiwraps)
 })
 ah <- AnnotationHub()
-# if on renku, use ah <- AnnotationHub(cache="ahcache")
 ```
 
 We will perform the primary analysis of an example dataset, at each step demonstrating the use of **both a very standard pipeline, and a full R-based equivalent**. Pay attention to which chunks are R or bash code (see header)
@@ -32,8 +31,8 @@ We download the data:
 options(timeout=3600)
 
 dir.create("raw")
-download.file("https://www.ethz-ins.org/content/ttk.fastq.gz", "ttk.fastq.gz", mode="wb")
-download.file("https://www.ethz-ins.org/content/input.fastq.gz", "input.fastq.gz", mode="wb")
+download.file("https://www.ethz-ins.org/content/ttk.fastq.gz", "raw/ttk.fastq.gz", mode="wb")
+download.file("https://www.ethz-ins.org/content/input.fastq.gz", "raw/input.fastq.gz", mode="wb")
 ```
 
 
@@ -91,6 +90,19 @@ Rfastp::curvePlot(qc$ttk, curve="content_curves")
 
 # Alignment
 
+Before we can run an alignment, we'll have to build a genome indices (which we need to do only once per genome).
+For this we'll first write the genome sequence to fasta format:
+
+```{r}
+# we get the genome sequence from AnnotationHub
+genome <- ah[["AH49674"]]
+# we create a new directory that will contain the genome index
+dir.create("BDGP6_genome")
+# we write the genome sequence in fasta format
+export(import.2bit(genome), "BDGP6_genome/genome.fasta.gz", compress=TRUE)
+```
+
+
 ## Using bowtie2
 
 ### Building a bowtie2 index
@@ -122,12 +134,6 @@ samtools index aligned/input.bam
 This we have to do only once for a genome, and can then re-use across projects
 
 ```{r, eval=FALSE}
-# we get the genome sequence from AnnotationHub
-genome <- ah[["AH49674"]]
-# we create a new directory that will contain the genome index
-dir.create("BDGP6_genome")
-# we write the genome sequence in fasta format
-export(import.2bit(genome), "BDGP6_genome/genome.fasta.gz", compress=TRUE)
 # we build a Rsubread index
 Rsubread::buildindex("BDGP6_genome/rsubread", reference="BDGP6_genome/genome.fasta.gz")
 ```
@@ -139,7 +145,7 @@ dir.create("aligned")
 align.stats <- Rsubread::align(index="BDGP6_genome/rsubread", type="dna",
                                readfile1=c("rfastp.trimmed/ttk_R1.fastq.gz", 
                                            "rfastp.trimmed/input_R1.fastq.gz"),
-                               output_file=c("aligned/ttk","aligned/input.bam"),
+                               output_file=c("aligned/ttk.bam","aligned/input.bam"),
                                nthreads=6, sortReadsByCoordinates=TRUE)
 align.stats
 ```
@@ -153,6 +159,7 @@ align.stats
 ## Using MACS
 
 ```{bash engine.opts='-l'}
+# hs mm dm
 mkdir -p peaks
 macs3 callpeak --outdir peaks -n ttk --gsize dm -t aligned/ttk.bam -c aligned/input.bam
 # macs2 works in the same way
@@ -169,6 +176,8 @@ peaks
 Note that MACS can also be called from within R, through the `MACSr` package (which wraps around macs3):
 
 ```{r}
+dir.create("peaks")
+
 # install MACSr, if not already done:
 if(!require("MACSr",quietly=TRUE)) BiocManager::install("MACSr")
 
@@ -176,6 +185,10 @@ library(MACSr)
 callpeak(tfile="aligned/ttk.bam", cfile = "aligned/input.bam",
          gsize="dm", outdir = "peaks", name = "ttk")
 # (will take a while the first time it's run, as it installs a new environment)
+
+peaks <- rtracklayer::import("peaks/ttk_peaks.narrowPeak")
+peaks <- rtracklayer::import("peaks/ttk_peaks.narrowPeak", format="narrowPeak") # for ENCODE data
+peaks
 ```
 
 ## Having a loog at a peak
@@ -187,7 +200,7 @@ plotSignalTracks(list(ttk="aligned/ttk.bam", input="aligned/input.bam"), region=
 
 # we're going to put both tracks on the same scale, and add the peaks coordinates:
 plotSignalTracks(list(ttk="aligned/ttk.bam", peaks=peaks, input="aligned/input.bam"), region=peaks[3],
-                 extend=5000, tracks.params=list(ylim=c(0,50)))
+                 extend=5000, tracks.params=list(ylim=c(0,80)))
 ```
 
 Note that an accumulation of reads at a given locus is not necessarily a binding event, but might also be an artifact.
@@ -197,4 +210,29 @@ This is the main reason for having a input control. For instance, let's have a l
 plotSignalTracks(c(ttk="aligned/ttk.bam", input="aligned/input.bam"), region="2R:342663-342814",
                  tracks.params=list(ylim=c(0,80)))
 ```
+
+While it's quick and easy to plot directly from the bam files with small datasets on a small genome, it can get very slow on larger datasets/genome. For this reason, we normally prepare bigwig files that contain only coverage:
+
+```{r}
+dir.create("coverage_tracks")
+bam2bw("aligned/ttk.bam", output_bw = "coverage_tracks/ttk.bw", extend = 151)
+bam2bw("aligned/input.bam", output_bw = "coverage_tracks/input.bw", extend = 151)
+```
+
+Note here that, since this is single-end sequencing data, we extended the reads to 151bp, because the MACS output told us that this was the average shift between strands (and hence average fragment size). (For paired-end sequencing data, we'd omit this and rather put `paired=TRUE`.)
+
+We could now plot from this bigwig file:
+
+```{r}
+# Plotting from the bigwig file:
+plotSignalTracks(list(ttk="coverage_tracks/ttk.bw", peaks=peaks), region=peaks[3], extend=5000)
+```
+
+To visualize multiple regions at the same time, we can use heatmaps (more on this next week) :
+
+```{r}
+sm <- signal2Matrix(list(ttk="coverage_tracks/ttk.bw"), regions = head(peaks,200), extend = 5000)
+plotEnrichedHeatmaps(sm)
+```
+
 
