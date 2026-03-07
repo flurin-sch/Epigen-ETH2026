@@ -1,0 +1,249 @@
+---
+title: "Assignment - Week 03"
+author: "Flurin Schindele"
+date: "2026-03-07"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(rstudioapi)
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+```
+
+```{r libraries}
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(Rsubread) # read alignment
+  library(rtracklayer) # read/write genomic file formats
+  library(Biostrings) # handling sequences
+  library(Rfastp) # read QC/trimming
+  library(epiwraps)
+})
+ah <- AnnotationHub()
+```
+
+```{r config}
+force_rerun <- TRUE
+```
+
+The `force_rerun` flag controls whether compute-intensive steps are re-executed. Set it to `TRUE` to recompute everything from scratch, ignoring any existing output files. With the default value of `FALSE`, each step is skipped if its output file is already present, greatly reducing runtime on repeated knits.
+
+# Processing of ChIP-seq data
+
+## Downloading Drosophila ChIP-seq data
+
+The raw reads are downloaded from the ENCODE portal (accession ENCFF127RRR). The file is only downloaded if it does not already exist locally.
+
+```{r download-raw-reads}
+dir.create("data")
+dir.create("data/raw")
+
+if (!file.exists("data/raw/ctcf.fastq.gz")) {
+  download.file(
+    url = "https://www.encodeproject.org/files/ENCFF127RRR/@@download/ENCFF127RRR.fastq.gz",
+    destfile = "data/raw/ctcf.fastq.gz",
+    mode = "wb"
+  )
+} else {
+  print("File already exists. Skipping download...")
+}
+```
+
+## Quality control
+
+`Rfastp` performs adapter trimming and quality filtering in a single step. 
+It produces a trimmed FASTQ file alongside a JSON report object (`qc`) containing per-read statistics. 
+The `qc` object is saved to disk so that the plots below can be rendered even when this step is skipped on re-runs.
+
+```{r qc-trimming}
+if (force_rerun || !file.exists("data/raw/trimmed_ctcf_R1.fastq.gz")) {
+  qc <- Rfastp::rfastp(
+    read1 = "data/raw/ctcf.fastq.gz",
+    outputFastq = "data/raw/trimmed_ctcf",
+    adapterTrimming = TRUE,
+    overrepresentationAnalysis = TRUE,
+    thread = 4
+  )
+  saveRDS(qc, "data/raw/trimmed_ctcf_qc.rds")
+} else {
+  message("Trimmed reads already exist. Loading cached QC stats.")
+  qc <- readRDS("data/raw/trimmed_ctcf_qc.rds")
+}
+```
+
+The quality curves show per-base quality scores and nucleotide composition before and after trimming.
+We have short reads with rather low base quality over all positions but especially towards the end.
+
+```{r qc-curve-plots, out.width="75%", fig.align="center"}
+Rfastp::curvePlot(qc, curves = "quality_curves")
+```
+
+QC content looks good and duplication levels are also acceptable.
+Also, `Rfastp` did not find any adapter sequences present in the reads.
+
+```{r, out.width="75%", fig.align="center"}
+Rfastp::curvePlot(qc, curve = "content_curves")
+```
+
+The duplication histogram shows how many reads appear at each duplication level.
+High duplication levels could indicate PCR over-amplification and potential loss of library complexity but here the distribution looks very good.
+
+```{r qc-duplication-plot, out.width="75%", fig.align="center"}
+plot(qc$duplication$histogram,
+  type = "b",
+  xlab = "Duplication level",
+  ylab = "Read count",
+  main = "Duplication histogram"
+)
+```
+
+## Alignment of reads
+
+Before alignment, we need to fetch the *D. melanogaster* BDGP6 genome sequence and build a genome index from the FASTA file.
+(The soft-masked version is used, meaning repetitive and low-complexity regions are represented in lowercase letters rather than being replaced with `N` (hard-masking). 
+This allows the aligner to down-weight alignments in repetitive regions while still retaining the underlying sequence information.)
+
+```{r download-genome}
+if (force_rerun || !file.exists("data/BDGP6_genome/bdgp6.fasta.gz")) {
+  dir.create("data/BDGP6_genome", showWarnings = FALSE)
+
+  query_results <- query(
+    ah,
+    c("drosophila melanogaster", "BDGP6", "dna_sm", "2bit")
+  )
+
+  dm_genome <- ah[[tail(rev(query_results$ah_id)[1])]]
+
+  export(import.2bit(dm_genome), "data/BDGP6_genome/bdgp6.fasta.gz", compress = TRUE)
+} else {
+  message("BDGP6 genome already exists. Skipping download.")
+}
+```
+
+```{r build-genome-index}
+if (force_rerun || !file.exists("data/BDGP6_genome/rsubread.files")) {
+  Rsubread::buildindex(
+    "data/BDGP6_genome/rsubread",
+    reference = "data/BDGP6_genome/bdgp6.fasta.gz"
+  )
+} else {
+  message("Rsubread index already exists. Skipping index building.")
+}
+```
+
+Trimmed reads are aligned to the BDGP6 genome with `Rsubread::align`.
+The output is a coordinate-sorted BAM file. 
+Alignment statistics are cached as an RDS file so the Report section can access them even when this step is skipped on re-runs.
+
+```{r align-reads}
+dir.create("data/aligned", showWarnings = FALSE)
+
+if (force_rerun || !file.exists("data/aligned/ctcf.bam")) {
+  align_stats <- Rsubread::align(
+    index = "data/BDGP6_genome/rsubread", type = "dna",
+    readfile1 = "data/raw/trimmed_ctcf_R1.fastq.gz",
+    output_file = "data/aligned/ctcf.bam",
+    sortReadsByCoordinates = TRUE,
+    nthreads = 6
+  )
+  saveRDS(align_stats, "data/aligned/align_stats.rds")
+} else {
+  message("Aligned BAM already exists. Loading cached alignment stats.")
+  align_stats <- readRDS("data/aligned/align_stats.rds")
+}
+align_stats
+```
+
+Enriched genomic regions (peaks) are called from the aligned BAM using MACS3. 
+The Drosophila effective genome size (`gsize = "dm"`) is used for the statistical model.
+
+```{r call-peaks}
+dir.create("data/peaks", showWarnings = FALSE)
+
+if (!require("MACSr", quietly = TRUE)) BiocManager::install("MACSr")
+library(MACSr)
+
+if (force_rerun || !file.exists("data/peaks/ctcf_peaks.narrowPeak")) {
+  callpeak(
+    tfile = "data/aligned/ctcf.bam",
+    gsize = "dm",
+    outdir = "data/peaks",
+    name = "ctcf"
+  )
+} else {
+  message("Peaks file already exists. Skipping peak calling.")
+}
+
+peaks <- rtracklayer::import("data/peaks/ctcf_peaks.narrowPeak", format = "narrowPeak")
+peaks <- peaks[order(peaks$score, decreasing = TRUE)]
+head(peaks)
+```
+
+## Report
+
+1. After filtering by `Rfastp`, we have `r align_stats["Total_reads", "ctcf.bam"]` reads left for alignment. Of those, **`r align_stats["Mapped_reads", "ctcf.bam"]`** were successfully mapped to the reference genome, which corresponds to a mapping rate of **`r round(align_stats["Mapped_reads", "ctcf.bam"] / align_stats["Total_reads", "ctcf.bam"] * 100, 2)`%**.
+2. We identified **`r length(peaks)`** peaks in the ChIP-seq data, which are potential binding sites of the CTCF transcription factor in the Drosophila genome.
+
+### Signal around a peak inside a gene
+
+To check what peaks fall inside gene bodies, we first load the latest Ensembl BDGP6 gene annotation from AnnotationHub.
+We also need to harmonise Chromosome naming conventions between the annotation and the peaks object, then peaks are subset to those overlapping a gene body.
+
+```{r load-gene-annotations}
+query_results <- query(ah, c("Drosophila melanogaster", "EnsDb", "BDGP6"))
+dm_ensdb <- ah[[tail(query_results$ah_id, 1)]]
+
+genes <- genes(dm_ensdb)
+seqlevelsStyle(genes) <- seqlevelsStyle(peaks) # harmonise chr naming
+
+peaks_in_genes <- suppressWarnings(peaks[overlapsAny(peaks, genes)])
+```
+
+The signal track below shows read coverage from the CTCF ChIP-seq experiment around a intragenic peak, extended by 1 kb on each side. The gene model is shown below the coverage track.
+
+```{r plot-signal-tracks, out.width="75%", fig.align="center"}
+region_of_interest <- peaks_in_genes[2]
+
+overlapping_gene <- suppressWarnings(genes[overlapsAny(genes, region_of_interest)][1]$gene_name)
+
+plotSignalTracks(
+  list(ctcf = "data/aligned/ctcf.bam"),
+  region = region_of_interest,
+  extend = 1000,
+  genomeAxis = TRUE,
+  ensdb = dm_ensdb,
+  transcripts = "full",
+  main = paste0("CTCF signal inside ", overlapping_gene, " gene"),
+  cex.main = 1.5
+)
+```
+
+The BAM file is converted to a bigWig coverage track using `bam2bw`. Reads are extended to 176 bp (estimated fragment length by MACS3) before computing coverage.
+
+```{r bam-to-bigwig}
+dir.create("data/coverage_tracks", showWarnings = FALSE)
+
+if (force_rerun || !file.exists("data/coverage_tracks/ctcf.bw")) {
+  bam2bw(
+    bamfile = "data/aligned/ctcf.bam",
+    output_bw = "data/coverage_tracks/ctcf.bw",
+    extend = 176)
+} else {
+  message("Coverage track already exists. Skipping bam2bw.")
+}
+```
+
+A signal matrix is computed centred on the top 200 peaks (ranked by MACS3 score), extended by ±1 kb.
+The heatmap visualises ChIP-seq enrichment across all selected peaks, with each row representing one peak.
+Here we can see, that the peaks are quite narrow and show a strong enrichment at the center.
+
+```{r signal-heatmap, out.width="75%", fig.align="center"}
+sm <- signal2Matrix(
+  list(ctcf = "data/coverage_tracks/ctcf.bw"),
+  regions = peaks[1:200],
+  extend = 1000
+)
+plotEnrichedHeatmaps(sm)
+```
