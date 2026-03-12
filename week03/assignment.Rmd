@@ -198,15 +198,15 @@ dm_ensdb <- ah[[tail(query_results$ah_id, 1)]]
 genes <- genes(dm_ensdb)
 seqlevelsStyle(genes) <- seqlevelsStyle(peaks) # harmonise chr naming
 
-peaks_in_genes <- suppressWarnings(peaks[overlapsAny(peaks, genes)])
+peaks_in_genes <- suppressWarnings(peaks[overlapsAny(peaks, genes, type = "within")])
 ```
 
 The signal track below shows read coverage from the CTCF ChIP-seq experiment around a intragenic peak, extended by 1 kb on each side. The gene model is shown below the coverage track.
 
 ```{r plot-signal-tracks, out.width="75%", fig.align="center"}
-region_of_interest <- peaks_in_genes[2]
+region_of_interest <- peaks_in_genes[1]
 
-overlapping_gene <- suppressWarnings(genes[overlapsAny(genes, region_of_interest)][1]$gene_name)
+overlapping_gene <- suppressWarnings(genes[overlapsAny(genes, region_of_interest, , type = "any")][1]$gene_name)
 
 plotSignalTracks(
   list(ctcf = "data/aligned/ctcf.bam"),
