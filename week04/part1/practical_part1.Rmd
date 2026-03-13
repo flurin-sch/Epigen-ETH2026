@@ -1,0 +1,103 @@
+---
+title: "Week04 part 1 : recap on bigwigs and visualization"
+author: "Pierre-Luc"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(rtracklayer)
+  library(epiwraps)
+  library(GenomicRanges)
+})
+ah <- AnnotationHub()
+ensdb <- ah[["AH95713"]] # Drosophila EnsDb
+```
+
+# Follow-up exploration of a ChIP-seq dataset
+
+We will follow-up on what we did last week, starting with already aligned reads and peaks from a different dataset (ChIP for CTCF in Drosophila S2 cells, subsetting to the chromosome 2L only).
+
+
+## Downloading the processed data
+
+
+You can download this data like this:
+
+```{r, eval=FALSE}
+download.file("https://ethz-ins.org/content/w04_practical.zip", "w04_practical.zip")
+unzip("w04_practical.zip")
+```
+
+## Generating bigwig files
+
+```{r}
+dir.create("tracks")
+epiwraps::bam2bw("aligned/ctcf.bam", "tracks/ctcf.bw", binWidth=20, extend=100, scaling=TRUE)
+epiwraps::bam2bw("aligned/input.bam", "tracks/input.bw", binWidth=20, extend=100, scaling=TRUE)
+
+# if the data is single-end and we do not know the average fragment size, use ?epiwraps::estimateFragSize
+# if paired-end reads, use paired=TRUE
+```
+
+
+## Visualizing multiple peaks at the same time
+
+```{r}
+peaks <- rtracklayer::import("peaks/ctcf.narrowPeak", format="narrowPeak")
+# when we download from ENCODE, peaks lack the narrowPeak extension but are still
+# in that format, so we might need to specify the format, e.g.:
+# peaks <- rtracklayer::import("peaks/ctcf.bed", format="narrowPeak")
+```
+
+
+```{r}
+tracks <- list(CTCF="tracks/ctcf.bw", input="tracks/input.bw")
+ese <- signal2Matrix(tracks, regions = peaks, extend = 2000)
+plotEnrichedHeatmaps(ese, row_title="My CTCF peaks")
+# function based on the EnrichedHeatmap package, itself based on ComplexHeatmap
+```
+By default, the rows are sorted according to the mean enrichment, weighted as a distance to the region centers. These values can be extracted using the `score` function.
+
+For example, we could select the most enriched half of the region using:
+
+```{r}
+meanEnrichment <- rowMeans(score(ese))
+ese2 <- ese[which(meanEnrichment >= median(meanEnrichment)), ]
+ese2
+plotEnrichedHeatmaps(ese2, row_title="My strong CTCF peaks")
+```
+
+## Signal relative to the input
+
+In this example, there isn't much signal in the input, but when the input also shows enrichment, it can be useful to express the IP (here CTCF) signal relative to the input:
+
+```{r}
+# generated a bigwig of log2-enrichment over the input:
+epiwraps::bam2bw(bamfile="aligned/ctcf.bam", bgbam="aligned/input.bam", output_bw = "tracks/ctcf_log2FE.bw", binWidth=20, extend=100)
+
+tracks <- list(CTCF="tracks/ctcf.bw", CTCF_log2FE="tracks/ctcf_log2FE.bw", input="tracks/input.bw")
+ese <- signal2Matrix(tracks, regions = peaks, extend = 2000)
+plotEnrichedHeatmaps(ese, row_title="My CTCF peaks", multiScale = TRUE)
+
+```
+
+## Overview annotation of the peaks
+
+Finally, we can get an overview of where the peaks are, relative to the regulatory elements, using:
+
+```{r}
+peaks2 <- annotateRegions(peaks, ensdb)
+head(peaks2)
+table(peaks2$class)
+```
+
+(similar results can be obtained e.g. with the ChIPseeker package)
+
+
+
+
+
+
+

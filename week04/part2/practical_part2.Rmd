@@ -1,0 +1,128 @@
+---
+title: "Week04 part 2 : Comparing multiple signals"
+author: "Pierre-Luc"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(ensembldb)
+  library(GenomicRanges)
+  library(epiwraps)
+  library(rtracklayer)
+  library(ggplot2)
+})
+# we shouldn't actually need this today, but in case:
+# ah <- AnnotationHub(localHub=TRUE)
+# ensdb <- ah[["AH89211"]]
+```
+
+# Comparing multiple signals
+
+## Downloading the data
+
+Download peaks and signals for in mESC, reduced to chr1 to make things more lightweight:
+
+```{r, eval=FALSE}
+options(timeout=1800)
+download.file("https://ethz-ins.org/content/p300_subset.zip", "p300_subset.zip")
+unzip("p300_subset.zip")
+```
+
+## Overlaps between peaks
+
+```{r}
+# to read a single peak file:
+# peaks <- rtracklayer::import("peaks/H3K27ac.bed", format="narrowPeak")
+# to read several peak files:
+# first list the files:
+peakfiles <- list.files("peaks", full.names = TRUE)
+# then give them meaningful names
+names(peakfiles) <- gsub("\\.bed","",basename(peakfiles))
+# then loop through them and read them:
+peaks <- lapply(peakfiles, FUN=rtracklayer::import, format="narrowPeak")
+```
+
+Check, for each set of peaks, what proportion overlaps with the p300 peaks:
+
+```{r}
+sapply(peaks, FUN=function(x) sum(overlapsAny(peaks$p300, x))/length(peaks$p300))
+```
+
+Here are other ways of visualizing overlaps between peaks
+
+```{r}
+# As a heatmap of overlaps:
+regionOverlaps(peaks)
+# As an upset plot:
+tmp <- regionsToUpset(peaks, nsets=length(peaks))
+UpSet(make_comb_mat(regionsToUpset(peaks, nsets=length(peaks))))
+```
+
+By default, this is comparing each set of peaks to a reference that is made by the (merged) union of all peaks. However, we can also compared to a pre-defined reference:
+
+```{r}
+ComplexHeatmap::UpSet(make_comb_mat(regionsToUpset(peaks, reference = peaks$p300, nsets=length(peaks))))
+```
+
+## Visualizing the p300 regions
+
+```{r}
+# list the bigwig files
+bwfiles <- list.files("tracks", full.names = TRUE)
+# then give them meaningful names
+names(bwfiles) <- gsub("\\.bw","",basename(bwfiles))
+
+# read the signal around the p300 peaks:
+sm <- signal2Matrix(bwfiles, regions=peaks$p300, w=50)
+# we could plot them all on separate scales:
+plotEnrichedHeatmaps(sm)
+# when doing that it can also help to use different colors, e.g.:
+plotEnrichedHeatmaps(sm, trim = 0.95, multiScale = TRUE, axis_name = "0", 
+                     colors=list("darkred","yellow","black","darkgreen","darkblue",
+                                 viridisLite::inferno(100)))
+```
+
+We can also try a quick approximative normalization method, to put everything on a comparable scale:
+
+```{r}
+sm <- renormalizeSignalMatrices(sm, method="top", trim = 0.05)
+plotEnrichedHeatmaps(sm, trim=0.95)
+```
+
+
+# Looking up at exclusive peaks
+
+## K27ac but not p300
+
+```{r}
+k27acOnly <- peaks$H3K27ac[!overlapsAny(peaks$H3K27ac,peaks$p300)]
+
+sm2 <- signal2Matrix(bwfiles[c(1,5)], regions=k27acOnly, w=50)
+
+plotEnrichedHeatmaps(sm2)
+```
+
+## p300 but not K27ac
+
+```{r}
+p300Only <- peaks$p300[!overlapsAny(peaks$p300,peaks$H3K27ac)]
+
+sm.p300 <- signal2Matrix(bwfiles[c(1,5)], regions=p300Only, w=50)
+
+plotEnrichedHeatmaps(sm.p300)
+```
+
+
+
+Now let's have a look at the union of all peaks:
+
+```{r}
+unionPeaks <- reduce(unlist(GRangesList(peaks)))
+sm <- signal2Matrix(bwfiles, regions=unionPeaks, w=50)
+sm2 <- renormalizeSignalMatrices(sm, method="top")
+plotEnrichedHeatmaps(sm2, trim=0.95) # same scale
+plotEnrichedHeatmaps(sm, trim=0.95, multiScale = TRUE) # separate scales
+```
+
