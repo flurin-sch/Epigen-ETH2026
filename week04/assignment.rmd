@@ -1,0 +1,207 @@
+---
+title: "Assignment - Week 04"
+author: "Flurin Schindele"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(AnnotationHub)
+  library(rtracklayer)
+  library(epiwraps)
+  library(GenomicRanges)
+})
+```
+
+
+```{r download, eval = FALSE}
+dir.create("data", showWarnings = FALSE)
+
+download.file(
+  url = "https://www.encodeproject.org/files/ENCFF179FJG/@@download/ENCFF179FJG.bed.gz",
+  destfile = "data/p300-mmES-ENCFF179FJG.bed.gz"
+)
+
+download.file(
+  url = "https://www.encodeproject.org/files/ENCFF360VIS/@@download/ENCFF360VIS.bed.gz",
+  destfile = "data/H3K27ac-mmES-ENCFF360VIS.bed.gz"
+)
+
+download.file(
+  url = "https://www.encodeproject.org/files/ENCFF008XKX/@@download/ENCFF008XKX.bed.gz",
+  destfile = "data/H3K27me3-mmES-ENCFF008XKX.bed.gz"
+)
+
+download.file(
+  url = "https://www.encodeproject.org/files/ENCFF326YGO/@@download/ENCFF326YGO.bed.gz",
+  destfile = "data/p300-mmB6NCrlLiver-ENCFF326YGO.bed.gz"
+)
+
+download.file(
+  url = "https://www.encodeproject.org/files/ENCFF109YUQ/@@download/ENCFF109YUQ.bed.gz",
+  destfile = "data/H3K27me3-mmB6NCrlLiver-ENCFF109YUQ.bed.gz"
+)
+
+download.file(
+  url = "https://www.encodeproject.org/files/ENCFF290MLR/@@download/ENCFF290MLR.bed.gz",
+  destfile = "data/H3K27ac-mmB6NCrlLiver-ENCFF290MLR.bed.gz"
+)
+```
+
+### Data Source and Peak Types
+
+The following BED files were downloaded from the ENCODE portal. Due to differences in available processed data for each experiment, the peak calling strategies vary:
+
+*   **p300 (mESC)**: `ENCFF179FJG` - *Optimal IDR thresholded peaks* (High confidence, consistent across replicates)
+*   **H3K27ac (mESC)**: `ENCFF360VIS` - *Replicated peaks* (Peaks present in both biological replicates)
+*   **H3K27me3 (mESC)**: `ENCFF008XKX` - *Pseudoreplicated peaks* (Derived from pooling reads and artificially splitting them; used when strict replication isn't available)
+*   **p300 (Liver)**: `ENCFF326YGO` - *IDR thresholded peaks* (High confidence)
+*   **H3K27me3 (Liver)**: `ENCFF109YUQ` - *Replicated peaks*
+*   **H3K27ac (Liver)**: `ENCFF290MLR` - *Replicated peaks*
+
+```{r}
+peakfiles <- list.files("data", full.names = TRUE)
+names(peakfiles) <- sub("^(.*)-.*\\.bed\\.gz$", "\\1", basename(peakfiles))
+peaks <- lapply(peakfiles, FUN=rtracklayer::import, format="narrowPeak")
+```
+
+```{r}
+ah <- AnnotationHub()
+
+# Query for the latest mouse EnsDb
+query_results <- query(ah, c("EnsDb", "Mus musculus"))
+ensdb <- ah[[tail(names(query_results), 1)]]
+```
+
+## TSS Overlap Analysis
+
+### What do we mean by “TSS”? (gene-level vs transcript-level)
+
+**Genes can have multiple transcripts**, and therefore **multiple possible TSS** (alternative promoters). As explained by Gemini:
+
+- **Gene-level TSS (one per gene):** simple and answers “what fraction of genes have a promoter/TSS overlapping this mark?”. In an EnsDb, the gene range typically spans all isoforms, so this effectively corresponds to the **most 5′ TSS per gene** (per strand).
+- **Transcript-level TSS (one per transcript):** closer to what the [HTSeq](https://htseq.readthedocs.io/en/latest/tutorials/tss.html) tutorial shows. It captures alternative promoters, but can **over-weight genes with many isoforms** unless you deduplicate or collapse per gene.
+
+```{r}
+# Gene-level TSS
+
+genes_gr <- genes(ensdb)
+
+# ENCODE peak files typically use UCSC seqnames like "chr1".
+# EnsDb often uses Ensembl-style seqnames like "1".
+# Convert to UCSC so overlaps work.
+GenomeInfoDb::seqlevelsStyle(genes_gr) <- "UCSC"
+
+# 1bp at the gene-level TSS
+# (one per gene; roughly the most 5′ start across isoforms, per strand)
+
+# promoters() is strand-aware: on '+' the TSS is at the start of the range,
+# on '-' it is at the end. promoters(x, upstream=0, downstream=1) returns a 1bp
+# GRanges exactly at the transcription start site definition.
+tss_gene <- promoters(genes_gr, upstream = 0, downstream = 1)
+
+length(tss_gene)
+```
+
+```{r}
+# Transcript-level TSS
+
+# One per transcript (can include multiple distinct TSS per gene)
+tx_gr <- transcripts(ensdb)
+GenomeInfoDb::seqlevelsStyle(tx_gr) <- "UCSC"
+
+tss_tx <- promoters(tx_gr, upstream = 0, downstream = 1)
+
+# Avoid counting identical TSS positions multiple times
+# (still: genes with multiple distinct promoters will appear multiple times)
+tss_tx_unique <- unique(tss_tx)
+
+c(n_tx = length(tss_tx), n_tx_unique = length(tss_tx_unique))
+```
+
+Now we can calculate the proportion of TSS overlapping with our peaks.
+
+```{r, warning=FALSE}
+# Helper function to calculate proportion of TSS overlapping peaks
+calc_overlap <- function(peak_set, tss_set) {
+  hits <- findOverlaps(tss_set, peak_set) # this returns a Hits object
+  length(hits) / length(tss_set) # we assume that all query hits are unique
+}
+
+# Proportion of TSS overlapping BOTH peak sets (logical AND)
+calc_overlap_both <- function(tss_set, peak_a, peak_b) {
+  in_a <- overlapsAny(tss_set, peak_a) # return logical vector of length len(tss_set)
+  in_b <- overlapsAny(tss_set, peak_b)
+  # as in_a and in_b are of length len(tss_set), 
+  # we can simply calculate the mean over the logical vector
+  mean(in_a & in_b) 
+}
+
+# Apply to all our peak sets (gene-level TSS)
+overlap_gene_tss <- sapply(peaks, calc_overlap, tss_set = tss_gene)
+
+# Apply to all our peak sets (transcript-level TSS; unique positions)
+overlap_tx_tss <- sapply(peaks, calc_overlap, tss_set = tss_tx_unique)
+
+res1 <- rbind(
+  gene_level_TSS = overlap_gene_tss,
+  transcript_level_TSS_unique = overlap_tx_tss
+)
+
+# Add combined overlaps for H3K27ac AND H3K27me3 in each tissue
+res1 <- cbind(
+  res1,
+  `H3K27mixed-mmB6NCrlLiver` = c(
+    gene_level_TSS = calc_overlap_both(
+      tss_gene,
+      peaks$`H3K27ac-mmB6NCrlLiver`,
+      peaks$`H3K27me3-mmB6NCrlLiver`
+    ),
+    transcript_level_TSS_unique = calc_overlap_both(
+      tss_tx_unique,
+      peaks$`H3K27ac-mmB6NCrlLiver`,
+      peaks$`H3K27me3-mmB6NCrlLiver`
+    )
+  ),
+  `H3K27mixed-mmES` = c(
+    gene_level_TSS = calc_overlap_both(
+      tss_gene,
+      peaks$`H3K27ac-mmES`,
+      peaks$`H3K27me3-mmES`
+    ),
+    transcript_level_TSS_unique = calc_overlap_both(
+      tss_tx_unique,
+      peaks$`H3K27ac-mmES`,
+      peaks$`H3K27me3-mmES`
+    )
+  )
+)
+```
+
+### 1. Proportion of TSS that overlap epigenetic marks
+
+The tables below show the proportion of the peaks overlapping either the TSS we have defined on the gene or transcript level.
+
+In the embryonic stem cells, roughly $2 \percent$ of TSS are marked with H3K27ac. 
+When looking at transcript level TSS, this proportion is slightly higher. 
+This could be due to the proximity of TSS for transcripts from the same gene and the fact that these histone modifications can be relatively "dispersed" (not extremely localized) over a genomic region and therefore overlapping multiple TSS at the same time.
+H3K27-trimethylation is much rarer, and overlap of both marks wasn't observed.
+This could hint at the uniformity of the cellular phenotype in the experiment, comparted to a differentiated organ (see below).
+
+```{r}
+res1[, c("H3K27ac-mmES", "H3K27me3-mmES", "H3K27mixed-mmES")]
+```
+
+As in stem cells, more TSS are marked with H3K27-acetylation rather than trimethylation in the liver.
+This indicates that roughly $2.5 \times$ more TSS are active than repressed.
+The proportion of "poised" or bivalent TSS is quite low but higher than in stem cells.
+As the liver contains multiple cell types, they show different gene regulation marks due to their diverse phenotypes.
+
+```{r}
+res1[, c("H3K27ac-mmB6NCrlLiver", "H3K27me3-mmB6NCrlLiver", "H3K27mixed-mmB6NCrlLiver")]
+```
