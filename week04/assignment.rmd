@@ -5,16 +5,24 @@ date: "`r Sys.Date()`"
 output: html_document
 ---
 
+<style type="text/css">
+  body{
+  font-size: 13pt;
+}
+</style>
+
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center", out.width = "75%")
 ```
 
-```{r}
+```{r load_libraries}
 suppressPackageStartupMessages({
   library(AnnotationHub)
+  library(ensembldb)
   library(rtracklayer)
-  library(epiwraps)
   library(GenomicRanges)
+  library(epiwraps)
+  library(ggplot2)
 })
 ```
 
@@ -53,7 +61,7 @@ download.file(
 )
 ```
 
-### Data Source and Peak Types
+## Data Source and Peak Types
 
 The following BED files were downloaded from the ENCODE portal. Due to differences in available processed data for each experiment, the peak calling strategies vary:
 
@@ -64,13 +72,19 @@ The following BED files were downloaded from the ENCODE portal. Due to differenc
 *   **H3K27me3 (Liver)**: `ENCFF109YUQ` - *Replicated peaks*
 *   **H3K27ac (Liver)**: `ENCFF290MLR` - *Replicated peaks*
 
-```{r}
+```{r import_peaks}
 peakfiles <- list.files("data", full.names = TRUE)
 names(peakfiles) <- sub("^(.*)-.*\\.bed\\.gz$", "\\1", basename(peakfiles))
 peaks <- lapply(peakfiles, FUN=rtracklayer::import, format="narrowPeak")
+
+# Ensure peaks also only have standard chromosomes (removes chrM, random contigs if any)
+# pruning.mode = "coarse": Drops the entire chromosome/level if it is not in the standard set.
+# This is necessary because if we have peaks on a non-standard chromosome (e.g. chrUn_...),
+# we cannot just "trim" them; we must discard the whole chromosome's data to proceed.
+peaks <- lapply(peaks, GenomeInfoDb::keepStandardChromosomes, pruning.mode = "coarse")
 ```
 
-```{r}
+```{r setup_annotationhub}
 ah <- AnnotationHub()
 
 # Query for the latest mouse EnsDb
@@ -80,14 +94,12 @@ ensdb <- ah[[tail(names(query_results), 1)]]
 
 ## TSS Overlap Analysis
 
-### What do we mean by “TSS”? (gene-level vs transcript-level)
-
 **Genes can have multiple transcripts**, and therefore **multiple possible TSS** (alternative promoters). As explained by Gemini:
 
 - **Gene-level TSS (one per gene):** simple and answers “what fraction of genes have a promoter/TSS overlapping this mark?”. In an EnsDb, the gene range typically spans all isoforms, so this effectively corresponds to the **most 5′ TSS per gene** (per strand).
 - **Transcript-level TSS (one per transcript):** closer to what the [HTSeq](https://htseq.readthedocs.io/en/latest/tutorials/tss.html) tutorial shows. It captures alternative promoters, but can **over-weight genes with many isoforms** unless you deduplicate or collapse per gene.
 
-```{r}
+```{r gene_tss, cache = TRUE}
 # Gene-level TSS
 
 genes_gr <- genes(ensdb)
@@ -95,6 +107,7 @@ genes_gr <- genes(ensdb)
 # ENCODE peak files typically use UCSC seqnames like "chr1".
 # EnsDb often uses Ensembl-style seqnames like "1".
 # Convert to UCSC so overlaps work.
+genes_gr <- GenomeInfoDb::keepStandardChromosomes(genes_gr, pruning.mode = "coarse")
 GenomeInfoDb::seqlevelsStyle(genes_gr) <- "UCSC"
 
 # 1bp at the gene-level TSS
@@ -104,44 +117,71 @@ GenomeInfoDb::seqlevelsStyle(genes_gr) <- "UCSC"
 # on '-' it is at the end. promoters(x, upstream=0, downstream=1) returns a 1bp
 # GRanges exactly at the transcription start site definition.
 tss_gene <- promoters(genes_gr, upstream = 0, downstream = 1)
-
 length(tss_gene)
 ```
 
-```{r}
+```{r transcript_tss}
 # Transcript-level TSS
 
 # One per transcript (can include multiple distinct TSS per gene)
 tx_gr <- transcripts(ensdb)
+tx_gr <- GenomeInfoDb::keepStandardChromosomes(tx_gr, pruning.mode = "coarse")
 GenomeInfoDb::seqlevelsStyle(tx_gr) <- "UCSC"
 
 tss_tx <- promoters(tx_gr, upstream = 0, downstream = 1)
 
 # Avoid counting identical TSS positions multiple times
-# (still: genes with multiple distinct promoters will appear multiple times)
+# genes with multiple distinct promoters will appear multiple times
+# but multiple transcripts sharing the same TSS will not be over-counted
 tss_tx_unique <- unique(tss_tx)
-
 c(n_tx = length(tss_tx), n_tx_unique = length(tss_tx_unique))
+```
+
+Here we define some helper functions to calculate proportions of overlaps that we can reuse for this script.
+
+```{r overlap_functions, warning=FALSE}
+# Helper function to calculate proportion of TSS overlapping peaks
+# should now be equivalent to prop_overlap() below
+calc_overlap <- function(peak_set, tss_set) {
+  hits <- findOverlaps(tss_set, peak_set) # this returns a Hits object
+  unique_hits <- unique(queryHits(hits)) # get unique TSS indices that overlap any peak
+  length(unique_hits) / length(tss_set)
+}
+
+# Directional overlap
+prop_overlap <- function(query_peaks, subject_peaks) {
+  mean(overlapsAny(query_peaks, subject_peaks))
+}
+
+# Function to calculate % overlap
+pct_overlap <- function(query, subject) {
+  mean(overlapsAny(query, subject)) * 100
+}
+
+# Proportion of TSS overlapping BOTH peak sets
+prop_overlap_both <- function(tss_set, peak_a, peak_b) {
+  in_a <- overlapsAny(tss_set, peak_a) # return logical vector of length len(tss_set)
+  in_b <- overlapsAny(tss_set, peak_b)
+  # as in_a and in_b are of length len(tss_set),
+  # we can simply calculate the mean over the logical vector
+  mean(in_a & in_b)
+}
+
+# For tidy printing of pairwise matrices
+pairwise_matrix_from_function <- function(peaks_list, FUN) {
+  nm <- names(peaks_list)
+  out <- outer(
+    nm, nm,
+    Vectorize(function(i, j) FUN(peaks_list[[i]], peaks_list[[j]]))
+  )
+  dimnames(out) <- list(query = nm, subject = nm)
+  out
+}
 ```
 
 Now we can calculate the proportion of TSS overlapping with our peaks.
 
-```{r, warning=FALSE}
-# Helper function to calculate proportion of TSS overlapping peaks
-calc_overlap <- function(peak_set, tss_set) {
-  hits <- findOverlaps(tss_set, peak_set) # this returns a Hits object
-  length(hits) / length(tss_set) # we assume that all query hits are unique
-}
-
-# Proportion of TSS overlapping BOTH peak sets (logical AND)
-calc_overlap_both <- function(tss_set, peak_a, peak_b) {
-  in_a <- overlapsAny(tss_set, peak_a) # return logical vector of length len(tss_set)
-  in_b <- overlapsAny(tss_set, peak_b)
-  # as in_a and in_b are of length len(tss_set), 
-  # we can simply calculate the mean over the logical vector
-  mean(in_a & in_b) 
-}
-
+```{r calculate_overlap, warning=FALSE}
 # Apply to all our peak sets (gene-level TSS)
 overlap_gene_tss <- sapply(peaks, calc_overlap, tss_set = tss_gene)
 
@@ -157,24 +197,24 @@ res1 <- rbind(
 res1 <- cbind(
   res1,
   `H3K27mixed-mmB6NCrlLiver` = c(
-    gene_level_TSS = calc_overlap_both(
+    gene_level_TSS = prop_overlap_both(
       tss_gene,
       peaks$`H3K27ac-mmB6NCrlLiver`,
       peaks$`H3K27me3-mmB6NCrlLiver`
     ),
-    transcript_level_TSS_unique = calc_overlap_both(
+    transcript_level_TSS_unique = prop_overlap_both(
       tss_tx_unique,
       peaks$`H3K27ac-mmB6NCrlLiver`,
       peaks$`H3K27me3-mmB6NCrlLiver`
     )
   ),
   `H3K27mixed-mmES` = c(
-    gene_level_TSS = calc_overlap_both(
+    gene_level_TSS = prop_overlap_both(
       tss_gene,
       peaks$`H3K27ac-mmES`,
       peaks$`H3K27me3-mmES`
     ),
-    transcript_level_TSS_unique = calc_overlap_both(
+    transcript_level_TSS_unique = prop_overlap_both(
       tss_tx_unique,
       peaks$`H3K27ac-mmES`,
       peaks$`H3K27me3-mmES`
@@ -183,17 +223,17 @@ res1 <- cbind(
 )
 ```
 
-### 1. Proportion of TSS that overlap epigenetic marks
+## 1. Proportion of TSS that overlap epigenetic marks
 
 The tables below show the proportion of the peaks overlapping either the TSS we have defined on the gene or transcript level.
 
-In the embryonic stem cells, roughly $2 \percent$ of TSS are marked with H3K27ac. 
+In the embryonic stem cells, roughly $2 \%$ of TSS are marked with H3K27ac. 
 When looking at transcript level TSS, this proportion is slightly higher. 
 This could be due to the proximity of TSS for transcripts from the same gene and the fact that these histone modifications can be relatively "dispersed" (not extremely localized) over a genomic region and therefore overlapping multiple TSS at the same time.
 H3K27-trimethylation is much rarer, and overlap of both marks wasn't observed.
 This could hint at the uniformity of the cellular phenotype in the experiment, comparted to a differentiated organ (see below).
 
-```{r}
+```{r view_results_es}
 res1[, c("H3K27ac-mmES", "H3K27me3-mmES", "H3K27mixed-mmES")]
 ```
 
@@ -202,6 +242,275 @@ This indicates that roughly $2.5 \times$ more TSS are active than repressed.
 The proportion of "poised" or bivalent TSS is quite low but higher than in stem cells.
 As the liver contains multiple cell types, they show different gene regulation marks due to their diverse phenotypes.
 
-```{r}
+```{r view_results_liver}
 res1[, c("H3K27ac-mmB6NCrlLiver", "H3K27me3-mmB6NCrlLiver", "H3K27mixed-mmB6NCrlLiver")]
 ```
+
+## 2. Relationship between p300, H3K27ac, and H3K27me3 and tissue-specific differences
+
+#### mESC
+
+```{r prepare_mesc_peaks}
+# Collect peak sets for mESC and keep only standard chromosomes.
+peaks_mESC <- list(
+  p300 = peaks$`p300-mmES`,
+  H3K27ac = peaks$`H3K27ac-mmES`,
+  H3K27me3 = peaks$`H3K27me3-mmES`
+)
+```
+
+```{r mesc_directional_overlap}
+# 1) Directional overlap fractions (rows=query, cols=subject)
+# Example: row p300, col H3K27ac = fraction of p300 peaks that overlap any H3K27ac peak.
+ov_mESC <- pairwise_matrix_from_function(peaks_mESC, prop_overlap)
+ov_mESC
+```
+
+The raw values and the plot show that the active marks (p300 and H3K27ac) have a high degree of overlap, while the repressive mark (H3K27me3) has very little overlap with either of the active marks.
+Around half the p300 positive marks also show H3K27 acetylation, which makes sense, as p300 is a histone acetyltransferase
+Only a quarter of H3K27ac marks overlap with p300.
+In general, K3K27 is the most common mark as shown by the `regionOverlaps()` plot below.
+
+```{r mesc_overlap_heatmap}
+# plot heatmap with values annotated
+blue_palette <- colorRampPalette(c("white", "steelblue"))(100)
+
+pheatmap(
+  ov_mESC,
+  main = "Directional Overlap Fractions (mouse Embryonic Stem Cells)",
+  color = blue_palette,
+  legend = FALSE,
+  display_numbers = TRUE,
+  number_color = "black",
+  fontsize_number = 10,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+)
+```
+
+```{r mesc_region_overlaps}
+# 2) Visual summaries of shared/exclusive peaks
+# TODO: disable clustering and keep input order
+epiwraps::regionOverlaps(peaks_mESC)
+```
+
+The UpSet plot below confirms the results from above again and gives us additional information about regions that share all three marks. 
+As expected from the pairwise overlap proportions above, the triple-marks are very rare.
+
+```{r mesc_upset}
+comb_mESC <- ComplexHeatmap::make_comb_mat(
+  epiwraps::regionsToUpset(peaks_mESC, nsets = length(peaks_mESC))
+)
+ComplexHeatmap::UpSet(comb_mESC, set_order = c("p300", "H3K27ac", "H3K27me3"))
+```
+
+#### Liver
+
+```{r prepare_liver_peaks}
+# Collect peak sets for liver and keep only standard chromosomes.
+peaks_liver <- list(
+  p300 = peaks$`p300-mmB6NCrlLiver`,
+  H3K27ac = peaks$`H3K27ac-mmB6NCrlLiver`,
+  H3K27me3 = peaks$`H3K27me3-mmB6NCrlLiver`
+)
+```
+
+```{r liver_directional_overlap}
+# 1) Directional overlap fractions
+ov_liver <- pairwise_matrix_from_function(peaks_liver, prop_overlap)
+ov_liver
+```
+
+In general, the same pattern as in stem cells can be observed in the liver.
+p300 and H3K27ac again show a high degree of overlap, but H3K27me3 shows higher overlap with either marks compared to stem cells.
+This hints at the heterogeneity of the liver tissue, which contains multiple cell types with different chromatin states, compared to the more uniform stem cell population.
+
+```{r liver_overlap_heatmap}
+# plot heatmap with values annotated
+pheatmap(
+  ov_liver,
+  main = "Directional Overlap Fractions (Liver)",
+  color = blue_palette,
+  legend = FALSE,
+  display_numbers = TRUE,
+  number_color = "black",
+  fontsize_number = 10,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+)
+```
+
+Here again, H3K27 is the most common mark that was detected.
+Interestingly, the relative proportion of H3K27me3 marks is much higher in the liver compared to stem cells.
+This could stem from the differentiation of the cells, which are now able to close more sites and repress more genes, that are not needed anymore.
+
+```{r liver_region_overlaps}
+# 2) Visual summaries of shared/exclusive peaks
+epiwraps::regionOverlaps(peaks_liver)
+```
+
+```{r liver_upset}
+comb_liver <- ComplexHeatmap::make_comb_mat(
+  epiwraps::regionsToUpset(peaks_liver, nsets = length(peaks_liver))
+)
+ComplexHeatmap::UpSet(comb_liver, set_order = c("p300", "H3K27ac", "H3K27me3"))
+```
+
+## 3. Relationship between regulatory elements active in mESC and in the differentiated tissue
+
+We will compare the peak sets between the two tissues (mESC vs Liver) to see how many regulatory elements are conserved and how many are specific to the cell type.
+
+### Conservation of Homologous Marks (Same mark, different tissue)
+
+```{r conservation_stats}
+# We can look at directional overlap:
+# "What % of mESC peaks are still present in Liver?"
+# "What % of Liver peaks were already present in mESC?"
+
+conservation_stats <- data.frame(
+  Mark = c("p300", "H3K27ac", "H3K27me3"),
+  mESC_retained_in_Liver = c(
+    pct_overlap(peaks_mESC$p300, peaks_liver$p300),
+    pct_overlap(peaks_mESC$H3K27ac, peaks_liver$H3K27ac),
+    pct_overlap(peaks_mESC$H3K27me3, peaks_liver$H3K27me3)
+  ),
+  Liver_premarked_in_mESC = c(
+    pct_overlap(peaks_liver$p300, peaks_mESC$p300),
+    pct_overlap(peaks_liver$H3K27ac, peaks_mESC$H3K27ac),
+    pct_overlap(peaks_liver$H3K27me3, peaks_mESC$H3K27me3)
+  )
+)
+
+print(conservation_stats)
+```
+
+For p300, the marks are quite specific to the tissue, with only around 10% of peaks retained in the liver and only 10% of liver peaks being pre-marked in mESC.
+Especially H3K27me3 shows a high retention of peaks from mESC to liver, which could indicate that many repressed regions in stem cells remain repressed in the differentiated tissue.
+I would interprete this as as sign that many genetic regions are neither needed in differentiated tissue and stem cells.
+The fact that only $15 \%$ of liver H3K27me3 peaks are pre-marked in mESC could indicate that in addition many regions become repressed during differentiation, which is expected as cells specialize.
+
+The two UpSet plot below show the same pattern in a visual manner.
+
+```{r k27_upset}
+# H3K27ac
+list_k27ac <- list(mESC_K27ac = peaks_mESC$H3K27ac,
+                   Liver_K27ac = peaks_liver$H3K27ac)
+comb_k27ac <- ComplexHeatmap::make_comb_mat(epiwraps::regionsToUpset(list_k27ac))
+ComplexHeatmap::UpSet(comb_k27ac, column_title = "H3K27ac Overlap")
+
+# H3K27me3
+list_k27me3 <- list(mESC_K27me3 = peaks_mESC$H3K27me3,
+                    Liver_K27me3 = peaks_liver$H3K27me3)
+comb_k27me3 <- ComplexHeatmap::make_comb_mat(epiwraps::regionsToUpset(list_k27me3))
+ComplexHeatmap::UpSet(comb_k27me3, column_title = "H3K27me3 Overlap")
+```
+
+### Transition of regulatory marks
+
+By looking at the overlap of peaks between the two tissues, we can classify the fate of regulatory elements during differentiation.
+This is a similar approach to what we have done before but gives us some additional information.
+
+```{r fate_transitions}
+classify_fate <- function(query_peaks, target_peaks_list) {
+  # Check overlaps with Active and Repressed marks in the target tissue
+  overlaps_active <- overlapsAny(query_peaks, target_peaks_list$H3K27ac)
+  overlaps_repressed <- overlapsAny(query_peaks, target_peaks_list$H3K27me3)
+  
+  # Initialize vector
+  fate <- rep("Lost / Other", length(query_peaks))
+  
+  # Assign categories based on overlaps
+  # Logic: Active > Repressed > Both (Bivalent)
+  fate[overlaps_active] <- "Active (H3K27ac)"
+  fate[overlaps_repressed] <- "Repressed (H3K27me3)"
+  fate[overlaps_active & overlaps_repressed] <- "Bivalent / Mixed"
+  
+  return(fate)
+}
+
+# 1. Fate of mESC Active Elements (H3K27ac)
+fate_mESC_K27ac <- classify_fate(peaks_mESC$H3K27ac, peaks_liver)
+
+# 2. Fate of mESC Repressed Elements (H3K27me3)
+fate_mESC_K27me3 <- classify_fate(peaks_mESC$H3K27me3, peaks_liver)
+
+# Create a combined data frame for plotting
+plot_data <- data.frame(
+  Origin_State = c(
+    rep("H3K27ac", length(fate_mESC_K27ac)),
+    rep("H3K27me3", length(fate_mESC_K27me3))
+  ),
+  Fate_in_Liver = c(fate_mESC_K27ac, fate_mESC_K27me3)
+)
+
+# Visualize as a stacked bar chart
+# This shows the proportion of original peaks ending up in each state
+ggplot(plot_data, aes(x = Origin_State, fill = Fate_in_Liver)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Chromatin State Transitions: mESC to Liver",
+       y = "Percentage of Original Peaks",
+       x = "Original State in mESC",
+       fill = "State in Liver") +
+  theme_minimal() +
+  scale_fill_manual(values = wesanderson::wes_palette("GrandBudapest2", n = 4))
+```
+
+Most of the mESC H3K27ac peaks that are retained in the liver remain active, but a small fraction also becomes repressed or bivalent.
+In general, most of the marks are lost during differentiation.
+This is true for both active and repressive marks.
+As expected from the data above, over half of the H3K27me3 peaks from mESC remain repressed in the liver.
+A much larger fraction of the originally repressed regions are now active or active in some cells (bivalent).
+
+## Other: Identification of "Poised to Active" Genes
+
+Finally, we can look at specific genes that undergo a transition from a repressed state in stem cells (H3K27me3) to an active state in the liver (H3K27ac). These could be developmental regulators or liver-specific genes.
+
+```{r liver_specific_genes}
+# 1. Get all protein-coding genes
+# We use the genes() function again, ensuring we get gene symbols
+protein_coding_genes <- genes(ensdb, filter = ~ gene_biotype == "protein_coding")
+
+# Force UCSC style and standard chromosomes to match our peaks
+protein_coding_genes <- GenomeInfoDb::keepStandardChromosomes(protein_coding_genes, pruning.mode = "coarse")
+GenomeInfoDb::seqlevelsStyle(protein_coding_genes) <- "UCSC"
+
+# Define promoters: -2kb to +2kb around TSS
+# I extended the ranges because otherwise no genes were captured
+# This captures peaks that are right before the gene which gene body overlap might miss
+prot_promoters <- promoters(protein_coding_genes, upstream = 2000, downstream = 2000)
+
+# 2. Find genes that are:
+#  - Marked with H3K27me3 in mESC (Repressed in Stem Cells)
+#  - Marked with H3K27ac in Liver (Active in Liver)
+
+# Subset promoters for mESC H3K27me3 overlap
+promoters_repressed_mESC <- subsetByOverlaps(prot_promoters, peaks_mESC$H3K27me3)
+
+# Subset those for Liver H3K27ac overlap
+promoters_poised_to_active <- subsetByOverlaps(promoters_repressed_mESC, peaks_liver$H3K27ac)
+
+# 3. Extract and display interesting liver-specific genes
+candidate_symbols <- promoters_poised_to_active$gene_name
+
+message("Number of poised-to-active genes: ", length(candidate_symbols))
+
+# Check for some famous liver markers (e.g., Albumin, Cytochrome P450s, Fibrinogen)
+liver_markers <- c("Alb", "Fga", "Fgb", "Fgg", "Cyp", "Apo")
+hits <- unique(grep(paste(liver_markers, collapse = "|"), candidate_symbols, value = TRUE))
+
+# Display the hits
+message("Potential liver-specific genes found in this set:")
+message(hits)
+
+# Also show the first few genes generally
+head(candidate_symbols, 20)
+```
+
+So with this method we find only [Apobec4](https://www.genecards.org/cgi-bin/carddisp.pl?gene=APOBEC4) as a gene with a repressive mark in stem cells and active mark in the liver.
+I expected to see more hits that only one gene, and the link of Apobec4 to the liver is not very direct.
+
+```{r session_info}
+sessionInfo()
+```
+
