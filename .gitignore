@@ -1,8 +1,13 @@
 **/*.Rhistory
+**/*.zip
 
 # data directories
 **/data/
+**/aligned/
+**/peaks/
+**/tracks/
 
 # specific files
 **/*.html
 !**/assignment.html
+
