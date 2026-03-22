@@ -1,0 +1,160 @@
+---
+title: "Week 5 - Differential binding analysis"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(SummarizedExperiment)
+  library(edgeR) # differential gene expression using neg.bin stats
+  library(epiwraps)
+  library(ggplot2)
+  library(sechm) # for plotting (features*samples) heatmaps
+})
+```
+
+
+Here we'll work with only a subset of the data from the GDVS paper, namely the ChIPseq (for Yy1) from just 2 mutant lines (deletions) and 2 controls, over chr9 only.
+
+## Downloading the data
+
+```{r, eval=FALSE}
+options(timeout=3600)
+download.file("https://ethz-ins.org/content/yy1.chr9.zip", "yy1.chr9.zip", mode="wb")
+unzip("yy1.chr9.zip")
+```
+
+
+## Getting a consensus set of windows
+
+```{r}
+peaks <- list.files("peaks",full=TRUE)
+names(peaks) <- gsub("\\.narrowPeak","",basename(peaks))
+peaks <- lapply(peaks, FUN=rtracklayer::import)
+head(peaks[[1]])
+merged_peaks <- reduce(unlist(GRangesList(peaks)))
+head(merged_peaks)
+
+# if we wanted to keep peaks that are replicated:
+# merged_peaks2 <- reduce(unlist(GRangesList(peaks)), with.revmap=TRUE)
+# merged_peaks2 <- merged_peaks2[which(lengths(merged_peaks2$revmap)>1)]
+
+head(merged_peaks)
+```
+
+Note that a good alternative to get consensus peaks across samples is to merge the reads from all samples, and call peaks on that.
+
+## Getting the counts per peak
+
+```{r}
+bams <- list.files("aligned/",pattern="bam$", full=TRUE)
+se <- peakCountsFromBAM(bams, regions=merged_peaks, paired=FALSE)
+colnames(se) <- gsub("\\.bam","",basename(bams))
+# we set the conditions:
+se$condition <- c("CTRL","CTRL","DEL","DEL")
+se
+```
+
+## Standard differential analysis with edgeR
+
+```{r}
+# we first put the data in the object structure edgeR uses:
+dds <- edgeR::DGEList(assay(se), group=se$condition)
+# we normalize, by default using TMM normalization:
+dds <- edgeR::calcNormFactors(dds)
+# we estimate dispersions:
+dds <- edgeR::estimateDisp(dds)
+
+et <- as.data.frame(topTags(exactTest(dds), Inf))
+head(et)
+
+# # note that we could use the formula interface to specify the model:
+# mm <- model.matrix(~condition, data=as.data.frame(colData(se)))
+# dds <- estimateDisp(dds, mm)
+# fit <- glmQLFit(dds, mm)   # <- this fits the linear model
+# res <- as.data.frame(topTags(glmQLFTest(fit)))  # <- this tests (one or more coefficients)
+# # however, for simple 2-group comparisons in edgeR the exact test above is normally a tiny bit more accurate
+```
+
+Quick look at the results:
+
+```{r}
+head(et)
+ggplot(et, aes(logFC, -log10(FDR))) + geom_point()
+```
+
+If you think back to the biology of the dataset we are analyzing, does anything look odd to you?
+
+
+
+
+
+
+
+## Testing alternative normalization methods
+
+### Normalization based on library size
+
+```{r}
+dds <- edgeR::DGEList(assay(se), group=se$condition)
+dds$samples$lib.size <- se$depth
+dds$samples$norm.factors <- 1
+dds <- estimateDisp(dds)
+et <- as.data.frame(topTags(exactTest(dds), Inf))
+ggplot(et, aes(logFC, -log10(FDR))) + geom_point()
+```
+
+### Normalization based on common peaks
+
+```{r}
+nf.ma <- epiwraps::getNormFactors(bams, peaks=peaks, method="MAnorm", paired = TRUE)
+dds$samples$norm.factors <- nf.ma
+dds$samples$lib.size <- median(se$depth) # so that edgeR doesn't do extra libsize normalization
+dds <- estimateDisp(dds)
+et <- as.data.frame(topTags(exactTest(dds), Inf))
+ggplot(et, aes(logFC, -log10(FDR))) + geom_point()
+```
+
+### Background normalization
+
+```{r}
+set.seed(123)
+# here since this relies on the coverage in random regions and the data has been
+# subsetted to chr9, we need to specify to use only that chromosome:
+nf.bg <- epiwraps::getNormFactors(bams, method="background", useSeqLevels = "9")
+dds$samples$norm.factors <- nf.bg
+dds$samples$lib.size <- median(se$depth)
+dds <- estimateDisp(dds)
+et <- as.data.frame(topTags(exactTest(dds), Inf))
+head(et)
+ggplot(et, aes(logFC, -log10(FDR))) + geom_point()
+```
+
+
+## Looking at the top differentially-bound peaks
+
+We could plot the peak counts with which we did the differential analysis:
+
+```{r}
+# we first place the normalized data back into our original SummarizedExperiment object:
+assay(se, "logcpm") <- log1p(cpm(dds))
+# we then plot the 20 most significant regions:
+topRegions <- head(row.names(et),20)
+sechm(se, topRegions, gaps_at="condition")
+```
+
+We could also plot the full signal in those regions, like we did in the previous weeks:
+
+```{r}
+tracks <- list.files("tracks/", full=TRUE)
+tracks
+sm <- signal2Matrix(tracks, rowRanges(se))
+
+sm <- renormalizeSignalMatrices(sm, scaleFactors=nf.ma)
+plotEnrichedHeatmaps(sm, row_title="All chr9 Yy1 peaks")
+
+# just the 20 most significant regions
+plotEnrichedHeatmaps(sm[head(row.names(et),20),], row_title="20 most significantly changing peaks")
+```
+
