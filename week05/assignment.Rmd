@@ -1,0 +1,294 @@
+---
+title: "Assignment - Week 05"
+author: "Flurin Schindele"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+<style type="text/css">
+  body{
+  font-size: 13pt;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center", out.width = "75%")
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(SummarizedExperiment)
+  library(edgeR) # differential gene expression using neg.bin stats
+  library(epiwraps)
+  library(ggplot2)
+  library(sechm) # for plotting (features*samples) heatmaps
+  library(dplyr)
+})
+```
+
+```{r download-data, eval=FALSE}
+dir.create("./data", showWarnings = FALSE)
+download.file(
+  "https://ethz-ins.org/content/mouse_mm38_hippocampus.peakCounts.SE.rds",
+  "data/mm38-hippocampus-peaksCounts.rds",
+  mode="wb"
+)
+```
+
+We are working with ATAC-seq data from the hippocampus of mice.
+As data we have raw peak counts.
+FSS denotes the "forced swim stress" condition.
+
+```{r load-data}
+se <- readRDS("data/mm38-hippocampus-peaksCounts.rds")
+print(se)
+print(colData(se))
+```
+
+First, we need to assign labels to the samples.
+As we want to compare stressed (FSS) and control samples as well as male and female mice, we need to distinguish both groups.
+
+```{r assign-labels}
+colData(se)$condition <- ifelse(grepl("FSS", row.names(colData(se))), "FSS", "Control")
+colData(se)$sex <- ifelse(grepl("_male_", row.names(colData(se))), "male", "female")
+print(colData(se))
+```
+
+We also need to assign row names to the assay.
+
+```{r assign-row-names}
+rownames(se) <- as.character(rowRanges(se))
+head(rownames(se))
+```
+
+# 1. Comparing Sex
+
+For the first analysis, we will focus on the sex differences in chromatin accessibility in the murine hippocampus.
+We will be using edgeR for differential analysis.
+
+1. Normalization is done using the TMM method, which should correct for sequencing depth differences between samples and the composition bias.
+2. We estimate dispersion in order to correctly model the count data as a negative binomial distribution. The BCV plot can give us some insight into how well this worked.
+3. We then perform an exact test to identify differentially accessible regions between male and female mice.
+
+```{r diff-sex}
+# Put data into format required by edgeR
+dds_sex<- edgeR::DGEList(assay(se), group=se$sex)
+
+# Normalization with TMM
+dds_sex <- edgeR::calcNormFactors(dds_sex)
+assay(se, "logcpm_sex") <- log1p(edgeR::cpm(dds_sex))
+
+# Dispersion estimation
+dds_sex <- edgeR::estimateDisp(dds_sex)
+
+et_sex <- as.data.frame(topTags(exactTest(dds_sex), Inf))
+et_sex %>%
+  filter(FDR <= 0.05) %>%
+  head(10)
+```
+
+```{r bcv-plot}
+plotBCV(dds_sex)
+```
+
+The plot shows us that the biological coefficient of variation (BCV) is relatively high. 
+Apparently, the blue line should also decrease with increasing CPM which is not really the case here.
+**Question, ask in lecture...**
+
+The table above shows us that the top hits are all located on either the Y or X chromosome.
+This should not be surprising for anyone but does not really help us in the analysis.
+Maybe this could also influence dispersion estimation.
+
+```{r sex-volcano}
+colors <- c("up" = "#C04F15", "down" = "#5682A3", "ns" = "grey") 
+sizes <- c("up" = 2, "down" = 2, "ns" = 1) 
+alphas <- c("up" = 1, "down" = 1, "ns" = 0.5)
+
+et_sex <- et_sex %>%
+  mutate(type = case_when(
+    logFC >= 1 & FDR <= 0.05 ~ "up",
+    logFC <= -1 & FDR <= 0.05 ~ "down",
+    TRUE ~ "ns"
+    )
+)
+
+et_sex$type <- factor(et_sex$type, levels=c("up", "down", "ns"))
+
+ggplot(data = et_sex,
+       aes(x = logFC,
+           y = -log10(FDR))) + 
+  geom_point(aes(color = type,    
+                 size = type,
+                 alpha = type)) + 
+  geom_hline(yintercept = -log10(0.05),
+             linetype = "dashed") + 
+  geom_vline(xintercept = c(log2(0.5), log2(2)),
+             linetype = "dashed") +
+  scale_colour_manual(values = colors) +
+  scale_size_manual(values = sizes) +
+  scale_alpha_manual(values = alphas)
+```
+
+We can look further into the count data of the top hits. 
+This could show us outliers and should also confirm the sex-chromosome problem.
+
+```{r sex-heatmap}
+topRegions_sex <- head(row.names(et_sex), 30)
+sechm(se, topRegions_sex, gaps_at="sex", assayName = "logcpm_sex")
+```
+
+**Question: What does the do.scale parameter do?**
+
+```{r sex-heatmap-scaled}
+sechm(se, topRegions_sex, gaps_at="sex", assayName = "logcpm_sex", do.scale = TRUE)
+```
+
+## Filtering out sex chromosomes
+
+By filtering out the sex chromosomes, we can increase the statistical power of our analysis to detect differences on the autosomes.
+
+```{r diff-autosomes}
+autosomes <- as.character(c(1:19)) 
+se_autosomes <- se[seqnames(se) %in% autosomes, ]
+
+dds_autosomes<- edgeR::DGEList(assay(se_autosomes), group=se$sex)
+
+# Normalization with TMM
+dds_autosomes <- edgeR::calcNormFactors(dds_autosomes)
+assay(se_autosomes, "logcpm_autosomes") <- log1p(edgeR::cpm(dds_autosomes))
+
+# Dispersion estimation
+dds_autosomes <- edgeR::estimateDisp(dds_autosomes)
+
+et_autosomes <- as.data.frame(topTags(exactTest(dds_autosomes), Inf))
+head(et_autosomes, 5)
+```
+
+```{r autosomes-volcano}
+et_autosomes <- et_autosomes %>%
+  mutate(type = case_when(
+    logFC >= 1 & FDR <= 0.05 ~ "up",
+    logFC <= -1 & FDR <= 0.05 ~ "down",
+    TRUE ~ "ns"
+    )
+)
+
+et_autosomes$type <- factor(et_autosomes$type, levels=c("up", "down", "ns"))
+
+ggplot(data = et_autosomes,
+       aes(x = logFC,
+           y = -log10(FDR))) + 
+  geom_point(aes(color = type,    
+                 size = type,
+                 alpha = type)) + 
+  geom_hline(yintercept = -log10(0.05),
+             linetype = "dashed") + 
+  geom_vline(xintercept = c(log2(0.5), log2(2)),
+             linetype = "dashed") +
+  scale_colour_manual(values = colors) +
+  scale_size_manual(values = sizes) +
+  scale_alpha_manual(values = alphas)
+```
+
+When filtering out the sex chromosomes, we see that there are no significant differences in chromatin accessibility between male and female mice.
+
+# 2. Stressed (FSS) vs. Control
+
+We can repeat the same procedure and compare stressed versus non-stressed mice.
+
+```{r diff-condition}
+dds_cond <- edgeR::DGEList(assay(se), group=se$condition)
+dds_cond <- edgeR::calcNormFactors(dds_cond)
+assay(se, "logcpm_condition") <- log1p(edgeR::cpm(dds_cond))
+dds_cond <- edgeR::estimateDisp(dds_cond)
+
+et_cond <- as.data.frame(topTags(exactTest(dds_cond), Inf))
+```
+
+```{r condition-volcano}
+et_cond <- et_cond %>%
+  mutate(type = case_when(
+    logFC >= 1 & FDR <= 0.05 ~ "up",
+    logFC <= -1 & FDR <= 0.05 ~ "down",
+    TRUE ~ "ns"
+    )
+)
+
+et_cond$type <- factor(et_cond$type, levels=c("up", "down", "ns"))
+
+ggplot(data = et_cond,
+       aes(x = logFC,
+           y = -log10(FDR))) + 
+  geom_point(aes(color = type,    
+                 size = type,
+                 alpha = type)) + 
+  geom_hline(yintercept = -log10(0.05),
+             linetype = "dashed") + 
+  geom_vline(xintercept = c(log2(0.5), log2(2)),
+             linetype = "dashed") +
+  scale_colour_manual(values = colors) +
+  scale_size_manual(values = sizes) +
+  scale_alpha_manual(values = alphas)
+```
+
+One region is significantly more accessible in stressed mice compared to controls.
+
+```{r}
+et_cond %>%
+  filter(FDR <= 0.05)
+```
+
+```{r condition-heatmap}
+topRegions_cond <- head(row.names(et_cond), 20)
+sechm(se, topRegions_cond, gaps_at="condition", top_annotation="sex", anno_colors = list("gold", "darkred"), assayName = "logcpm_condition")
+```
+
+```{r condition-heatmap-scaled}
+# Question: why are anno_colors ignored?
+sechm(se, topRegions_cond, gaps_at="condition", top_annotation="sex", anno_colors = list("gold", "darkred"), assayName = "logcpm_condition", do.scale = TRUE)
+```
+
+# Extra: Controlling for Sex
+
+We should control for a potential confounding effect of the sex on the condition effect.
+For this we can use generalized linear models as described in [edgeR User’s Guide, section 2.12](https://www.bioconductor.org/packages/release/bioc/vignettes/edgeR/inst/doc/edgeRUsersGuide.pdf).
+
+
+```{r diff-sex-cond}
+# 1. Create design matrix
+design <- model.matrix(~ sex + condition, data = colData(se))
+
+# 2. Initialize DGEList and normalize
+dge <- DGEList(counts = assay(se))
+dge <- calcNormFactors(dge)
+assay(se, "logcpm_sex_condition") <- log1p(edgeR::cpm(dge))
+
+# 3. Estimate dispersion using the design matrix
+dge <- estimateDisp(dge, design)
+
+# 4. Fit the Quasi-Likelihood GLM (Recommended for better FDR control)
+fit <- glmQLFit(dge, design)
+
+# 5. Test for the 'condition' effect which is the last column in the design matrix
+qlf <- glmQLFTest(fit, coef = ncol(design))
+
+summary(decideTests(qlf))
+
+res <- as.data.frame(topTags(qlf, n = Inf))
+head(res)
+```
+
+Sadly, we do not find any significant differences between stressed and control mice when controlling for the sex effect.
+
+```{r mds-plot}
+# Create an MDS plot colored by condition and shaped by sex
+plotMDS(dge, col = as.numeric(factor(se$condition)), 
+        pch = as.numeric(factor(se$sex)))
+#legend("topleft", legend = levels(factor(se$condition)), 
+#       text.col = 1:nlevels(factor(se$condition)))
+```
+
+```{r sessionInfo}
+sessionInfo()
+```
