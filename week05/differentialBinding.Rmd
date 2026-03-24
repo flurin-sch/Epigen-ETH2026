@@ -21,15 +21,16 @@ Here we'll work with only a subset of the data from the GDVS paper, namely the C
 
 ```{r, eval=FALSE}
 options(timeout=3600)
-download.file("https://ethz-ins.org/content/yy1.chr9.zip", "yy1.chr9.zip", mode="wb")
-unzip("yy1.chr9.zip")
+dir.create("tutorial_data")
+download.file("https://ethz-ins.org/content/yy1.chr9.zip", "tutorial_data/yy1.chr9.zip", mode="wb")
+unzip("tutorial_data/yy1.chr9.zip", exdir="tutorial_data")
 ```
 
 
 ## Getting a consensus set of windows
 
 ```{r}
-peaks <- list.files("peaks",full=TRUE)
+peaks <- list.files("tutorial_data/peaks",full=TRUE)
 names(peaks) <- gsub("\\.narrowPeak","",basename(peaks))
 peaks <- lapply(peaks, FUN=rtracklayer::import)
 head(peaks[[1]])
@@ -48,7 +49,7 @@ Note that a good alternative to get consensus peaks across samples is to merge t
 ## Getting the counts per peak
 
 ```{r}
-bams <- list.files("aligned/",pattern="bam$", full=TRUE)
+bams <- list.files("tutorial_data/aligned/",pattern="bam$", full=TRUE)
 se <- peakCountsFromBAM(bams, regions=merged_peaks, paired=FALSE)
 colnames(se) <- gsub("\\.bam","",basename(bams))
 # we set the conditions:
@@ -86,11 +87,7 @@ ggplot(et, aes(logFC, -log10(FDR))) + geom_point()
 
 If you think back to the biology of the dataset we are analyzing, does anything look odd to you?
 
-
-
-
-
-
+> We should not see positive fold changes, since YY1 is deleted in the non-control samples.
 
 ## Testing alternative normalization methods
 
@@ -147,7 +144,7 @@ sechm(se, topRegions, gaps_at="condition")
 We could also plot the full signal in those regions, like we did in the previous weeks:
 
 ```{r}
-tracks <- list.files("tracks/", full=TRUE)
+tracks <- list.files("tutorial_data/tracks/", full=TRUE)
 tracks
 sm <- signal2Matrix(tracks, rowRanges(se))
 
