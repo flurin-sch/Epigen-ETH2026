@@ -11,13 +11,16 @@ suppressPackageStartupMessages({
   library(ggplot2)
   library(memes) # for the meme-based methods -- COMMENT OUT when using alternatives
   library(motifmatchr) # for scanning sequences for matches of given motifs
-  library(Biostrings) # for handling sequences
+  library(Biostrings) # for Ωhandling sequences
   library(MotifDb) # database of motifs
   library(TFBSTools) # for handling some motif formats
   library(universalmotif) # for converting motifs to various formats
-  library(PWMEnrich) # for R-based motif enrichment analysis
+  # library(PWMEnrich) # for R-based motif enrichment analysis
   library(GenomeInfoDb)
 })
+
+options(meme_bin = "/opt/meme/bin/")
+check_meme_install()
 ```
 
 
@@ -57,6 +60,11 @@ As this is methodologically fairly simple, it doesn't really matter what method 
 motifs <- query(MotifDb, c("CTCF"))
 # there are several matching motifs:
 names(motifs)
+
+# generally very similar for conserved TF
+# critical when loooking at tissue-specific TF, here sequences may differ
+view_motifs(motifs[c(3:4)])
+
 # we select one:
 motif <- motifs[["Mmusculus-HOCOMOCOv10-CTCF_MOUSE.H10MO.A"]]
 motif
@@ -81,12 +89,17 @@ head(moi)
 hist(moi$score)
 ```
 
+The score quantifies how well the sequence matches the motif. Can be converted to p-value but for this we would need information about background frequencies.
+
 Then we could for instance ask questions such as how many of the peaks have a motif?
 
 ```{r}
 table(overlapsAny(peaks_chr1, moi))
 ```
 
+Matching is a gradient, so `FALSE` doesn't necessarily mean that there is no motif in this peak.
+If we lowered the threshold for what we consider a match, we would get more matches, but they would be less similar to the motif.
+CTCF is quite sequence specific which is why we get quite many matches.
 
 ## Scanning the whole genome
 
@@ -137,7 +150,8 @@ as.character(peak_seqs[1])
 # obtain the motifs (e.g. here use all the mouse motifs)
 # To avoid having redundant motifs, we query motifs from a single source:
 motifs <- query(MotifDb, c("Mmusculus", "HOCOMOCOv10"))
-ame <- memes::runAme(peak_seqs, database=convert_motifs(motifs), meme_path="~/meme/bin")
+names(peak_seqs) <- paste0("seq_", seq_along(peak_seqs))
+ame <- memes::runAme(peak_seqs, database=convert_motifs(motifs), silent=TRUE, meme_path = "/opt/meme/bin/")
 head(ame)
 ```
 
@@ -175,8 +189,7 @@ Motif **discovery** aims at finding _new motifs_ that are enriched in a set of s
 # this requires having the meme suite installed
 mr <- memes::runStreme( input = peak_seqs,
                         control = "shuffle", # the peak sequences will be compared to shuffled versions (with same dinucleotide frequency)
-                        nmotifs=5, # determines how many motifs we will try to find
-                        meme_path = "~/meme/bin/") # depending on your setup, you might need to specify where the meme binaries were installed
+                        nmotifs=5) # determines how many motifs we will try to find
 # (we could also specify a background set of regions, instead of shuffled sequences)
 mr[,c("consensus", "pval", "nsites")]
 ```
