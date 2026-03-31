@@ -1,0 +1,456 @@
+---
+title: "Assignment - Week 06"
+author: "Flurin Schindele"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    highlight: default
+    df_print: paged
+---
+
+<style type="text/css">
+
+body{
+  font-size: 13pt;
+}
+
+/* Main container - set position for TOC alignment */
+.main-container {
+    max-width: 940px;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+/* TOC box styling - elegant and light */
+.tocify {
+  width: 100%;
+  max-height: calc(100vh - 100px);
+  overflow-y: auto;
+  background: #fff;
+  padding: 10px 5px;
+  border: none;
+  border-left: 1px solid #ddd;
+  border-radius: 0;
+  box-shadow: none;
+  pointer-events: auto;
+}
+
+.tocify ul, .tocify li {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tocify-header {
+  text-indent: 0;
+}
+
+.tocify-subheader {
+  font-size: 90%;
+}
+
+.tocify a {
+  color: inherit;
+  text-decoration: none;
+  display: block;
+  cursor: pointer;
+}
+
+.tocify .list-group-item:hover {
+  background-color: transparent;
+  color: #555;
+  border-left: 2px solid #aaa;
+}
+
+.tocify .list-group-item.active {
+  background-color: transparent;
+  color: #333;
+  border-left: 2px solid #555;
+  font-weight: 500;
+}
+
+.tocify .list-group-item {
+  background-color: transparent;
+  border: none;
+  padding: 2px 8px 2px 10px;
+  margin: 0;
+  display: inline-block;
+  color: #888;
+  border-left: 2px solid transparent;
+  margin-left: -1px;
+  cursor: pointer;
+  line-height: 1.3;
+  /* Text wrapping for long headers */
+  white-space: normal;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+/* Subheader indentation */
+.tocify-subheader .list-group-item {
+  padding-left: 5px;
+}
+
+p.caption {
+  margin: 0 10px 0 10px;
+  font-style: italic;
+  font-size: 90%;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center", out.width = "75%")
+```
+
+```{r packages}
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(dplyr)
+  library(AnnotationHub)
+  library(GenomicRanges)
+  library(memes) # for the meme-based methods
+  library(motifmatchr) # for scanning sequences for matches of given motifs
+  library(Biostrings) # for Ωhandling sequences
+  library(MotifDb) # database of motifs
+  library(TFBSTools) # for handling some motif formats
+  library(universalmotif) # for converting motifs to various formats
+  library(GenomeInfoDb)
+  library(Rsamtools)
+})
+ah <- AnnotationHub()
+options(meme_bin = "/opt/meme/bin/")
+```
+
+# Download REST ChIP-seq peaks
+
+We are working with ChIP-seq peak data for the REST transcription factor in mouse.
+The data consists of narrow peaks from the ENCODE project.
+
+```{r bed-download}
+dir.create("./data", showWarnings = FALSE)
+download.file(
+  "https://www.encodeproject.org/files/ENCFF368VWJ/@@download/ENCFF368VWJ.bed.gz",
+  "data/REST_ChIPseq_peaks-ENCFF368VWJ.bed.gz",
+  mode="wb"
+)
+```
+
+We load the peaks and convert sequence level styles to UCSC format.
+For computational efficiency, we focus on chromosome 1 for some analyses.
+
+```{r}
+peaks <- rtracklayer::import("data/REST_ChIPseq_peaks-ENCFF368VWJ.bed.gz", format="NarrowPeak")
+seqlevelsStyle(peaks) <- "UCSC"
+peaks_chr1 <- peaks[seqnames(peaks)=="chr1"]
+```
+
+```{r}
+query_results <- AnnotationHub::query(ah, c("Mus musculus", "mm10", "2bit"))
+genome <- ah[[tail(query_results$ah_id)[1]]]
+```
+
+```{r}
+if (!file.exists("data/mm10.fa")) {
+  options(timeout = max(600, getOption("timeout")))
+  download.file(
+    "https://hgdownload.soe.ucsc.edu/goldenPath/mm10/bigZips/mm10.fa.gz",
+    "data/mm10.fa.gz"
+  )
+  R.utils::gunzip("data/mm10.fa.gz", destname="data/mm10.fa")
+  Rsamtools::indexFa("data/mm10.fa")
+} else {
+  message("FASTA file already exists, skipping download.")
+}
+fasta_path <- "data/mm10.fa"
+```
+
+# Motif detection
+
+We retrieve the REST motif position weight matrix from the HOCOMOCO v10 database.
+This motif represents the DNA binding preference of the REST transcription factor.
+
+```{r}
+mouse_motifs <- query(MotifDb, c("Mmusculus", "HOCOMOCOv10"))
+rest_motif <- mouse_motifs[grep("REST", names(mouse_motifs))]
+
+view_motifs(rest_motif)
+```
+
+# Motif Enrichment
+
+ChIP-seq peaks typically have variable widths but we expect the actual binding-motif to be located near the center of peaks.
+To standardize our analysis, we resize all peaks to 100 bp centered on the peak summit.
+This allows for consistent motif enrichment analysis across all regions.
+
+```{r}
+quantile(width(peaks_chr1))
+peak_centers <- resize(peaks, fix="center", width=100)
+quantile(width(peak_centers))
+```
+
+We extract the DNA sequences for these centered peak regions from the genome.
+
+```{r}
+peak_seqs <- memes::get_sequence(peak_centers, genome)
+names(peak_seqs) <- paste0("seq_", seq_along(peak_seqs))
+writeXStringSet(peak_seqs, file = "data/peaks_centered_100bp.fa")
+head(peak_seqs, 5)
+```
+
+We run AME (Analysis of Motif Enrichment) to test which motifs are enriched in our peak sequences.
+AME compares motif occurrence in peak sequences against a control to identify significantly enriched motifs.
+
+```{r}
+if (!file.exists("data/ame_results.rds")) {
+  ame <- memes::runAme(peak_seqs, database=convert_motifs(mouse_motifs), silent=TRUE)
+  saveRDS(ame, "data/ame_results.rds")
+} else {
+  print("Loading AME results from file...")
+  ame <- readRDS("data/ame_results.rds")
+}
+head(ame)
+```
+
+The enrichment plot shows motifs by their fold-enrichment and statistical significance.
+The REST motif is the most enriched motifs, as expected for REST ChIP-seq peaks.
+The x-axis shows fold-enrichment of true positives over false positives, while the y-axis shows statistical significance.
+
+```{r}
+ggplot(ame, aes(log2((1+tp)/(1+fp)), -log10(adj.pvalue), size=tp_percent)) + 
+  geom_point(alpha=0.3) + geom_text(aes(label=motif_id), data=head(ame)) +
+  labs(x="log2(fold-enrichment)", size="% of set")
+```
+
+## Visualizing Motif Location Centrimo
+
+Centrimo identifies the central enrichment of motifs relative to peak centers.
+If motifs are truly associated with transcription factor binding, they should be enriched at the peak center.
+We can use Centrimo to analyze the spatial distribution of REST motifs within our peak regions.
+
+```{bash}
+curl -L -o data/H14CORE_meme_format.meme https://hocomoco14.autosome.org/final_bundle/hocomoco14/H14CORE/formatted_motifs/H14CORE_meme_format.meme
+
+/opt/meme/bin/centrimo -oc data/centrimo_results --verbosity 1 data/peaks_centered_100bp.fa data/H14CORE_meme_format.meme
+
+awk '/MOTIF.*REST/{print; flag=1; next} /DB/ && flag{flag=0} flag' data/centrimo_results/site_counts.txt > data/centrimo_results/rest_counts.txt
+```
+
+The resulting html file can be found under `data/centrimo_results/centrimo.html`.
+
+We can also visualize the distribution of the REST motif only using the `rest_counts.txt` file we extracted from the Centrimo output.
+The plot shows a strong central enrichment of REST motifs, with a peak around position 0 (the peak center).
+This confirms that REST motifs are preferentially located at the center of ChIP-seq peaks, which again hints at genuine binding sites.
+I believe that the higher the ChIP-seq resolution, the narrower the peaks.
+Our curve looks pretty rough and noisy compared to the Centrimo output, because we did not perform any smoothing (Centrimo does sliding-window averaging).
+
+```{r}
+data <- read.table("data/centrimo_results/rest_counts.txt", skip = 1, header = FALSE, col.names = c("position", "count"))
+data$prop <- data$count / sum(data$count)
+# 2. Create the plot
+ggplot(data, aes(x = position, y = prop)) +
+  geom_area(fill = "steelblue", alpha = 0.4) + # Fills the area under the curve
+  geom_line(color = "steelblue", size = 1) +  # Adds a sharp line on top
+  theme_minimal() +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") + # Mark the center
+  labs(
+    title = "REST Motif Central Enrichment",
+    subtitle = "Distribution of motif matches relative to ChIP-seq peak centers",
+    x = "Distance from Peak Center (bp)",
+    y = "Proportion of Motif Sites"
+  ) +
+  coord_cartesian(xlim = c(-50, 50)) +
+  scale_x_continuous(breaks = seq(-40, 40, by = 10))
+  
+```
+
+# Motif Matching
+
+## Finding Motifs in the Mouse Genome
+
+We use motifmatchr to scan the entire mouse genome for sequences matching the REST motif.
+This creates a reference set of all potential REST binding sites based on sequence alone.
+
+```{r}
+if (!file.exists("data/motifs_genome.rds")) {
+  
+  # 1. Create a reference to the FASTA file
+  
+  genome_fa <- FaFile(fasta_path)
+  
+  # 2. Extract chromosome names and lengths to create a GRanges object
+  genome_ranges <- as(seqinfo(genome_fa), "GRanges")
+  
+  # 3. Convert motif
+  target_pwm <- convert_motifs(rest_motif, class="TFBSTools-PWMatrix")[[1]]
+  
+  # 4. Run matchMotifs
+  # subject = GRanges defining the regions (the whole chromosomes)
+  # genome = FaFile containing the actual DNA sequence
+  motifs_genome_raw <- motifmatchr::matchMotifs(
+    pwms = target_pwm,
+    subject = genome_ranges, 
+    genome = genome_fa,
+    out = "positions"
+  )
+  
+  # 5. Extract the GRanges for the motif
+  motifs_genome <- motifs_genome_raw[[1]]
+  
+  saveRDS(motifs_genome, "data/motifs_genome.rds")
+  
+} else {
+  message("Loading genome-wide motifmatchr results from file...")
+  motifs_genome <- readRDS("data/motifs_genome.rds")
+}
+
+head(motifs_genome)
+```
+
+The score distribution shows the quality of motif matches across the genome.
+Higher scores indicate better matches to the REST consensus sequence.
+
+```{r}
+hist(motifs_genome$score)
+```
+
+We can determine how many of the genome-wide REST motifs overlap with ChIP-seq peaks.
+This shows how many potential binding sites are actually bound by REST in this experiment.
+
+```{r}
+table(overlapsAny(peaks, motifs_genome))
+```
+
+## Finding Motifs in the ChIP-seq Peaks
+
+### Using FIMO
+
+FIMO (Find Individual Motif Occurrences) scans peak sequences for REST motif matches.
+It reports the position and score of each match, allowing us to identify which peaks contain the motif.
+As far as I understand, it should behave quite similarly to motifmatchr but we will compare below.
+
+```{r}
+if (!file.exists("data/fimo_peaks_results.rds")) {
+  fimo_peaks <- memes::runFimo(
+    sequences = peak_seqs,
+    motifs = convert_motifs(rest_motif),
+    parse_genomic_coord = FALSE
+  )
+  saveRDS(fimo_peaks, "data/fimo_peaks_results.rds")
+} else {
+  print("Loading FIMO results from file...")
+  fimo_peaks <- readRDS("data/fimo_peaks_results.rds")
+}
+head(fimo_peaks)
+message("Number of peaks with FIMO match: ", length(unique(fimo_peaks)))
+```
+
+The score distribution for FIMO matches shows predominantly high-scoring motif occurrences within ChIP-seq peaks.
+
+```{r}
+hist(fimo_peaks$score)
+```
+
+### Using motifmatchr
+
+As an alternative approach, we use motifmatchr to identify REST motifs within ChIP-seq peaks.
+
+```{r}
+if (!file.exists("data/motifmatchr_peaks.rds")) {
+  genome_fa <- FaFile(fasta_path)
+  
+  motifmatchr_peaks <- motifmatchr::matchMotifs(
+    pwms = convert_motifs(rest_motif, class="TFBSTools-PWMatrix")[[1]],
+    subject = peaks,
+    genome = genome_fa,
+    out = "positions"
+  )[[1]]
+  saveRDS(motifmatchr_peaks, "data/motifmatchr_peaks.rds")
+} else {
+  print("Loading motifmatchr results from file...")
+  motifmatchr_peaks <- readRDS("data/motifmatchr_peaks.rds")
+}
+head(motifmatchr_peaks)
+message("Number of peaks with motifmatchr match: ", length(motifmatchr_peaks))
+```
+
+We can compare the score distributions between FIMO and motifmatchr.
+Both methods identify similar high-quality matches, though FIMO finds more motif instances including lower scores.
+This difference could be due to different thresholds for motif reporting but I did not check.
+
+```{r}
+# 1. Extract scores and label the source
+df_fimo <- data.frame(
+  score = fimo_peaks$score, 
+  method = "FIMO"
+)
+
+df_motifmatchr <- data.frame(
+  score = motifmatchr_peaks$score, 
+  method = "motifmatchr"
+)
+
+# 2. Combine into one data frame for plotting
+plot_data <- rbind(df_fimo, df_motifmatchr)
+
+# 3. Create the plot
+# Using geom_density is often cleaner than a histogram for comparing two distributions
+ggplot(plot_data, aes(x = score, fill = method)) +
+  geom_density(alpha = 0.4) + 
+  theme_minimal() +
+  labs(
+    title = "Comparison of Motif Match Scores",
+    subtitle = paste("FIMO n =", nrow(df_fimo), "| motifmatchr n =", nrow(df_motifmatchr)),
+    x = "Log-odds Score",
+    y = "Density"
+  ) +
+  scale_fill_manual(values = c("FIMO" = "#00BFC4", "motifmatchr" = "#F8766D"))
+```
+
+# Motif Discovery
+
+STREME (Sensitive, Thorough, Rapid, Enriched Motif Elicitation) performs de novo motif discovery.
+Rather than searching for known motifs, it identifies enriched sequence patterns directly from the data.
+We compare peak sequences to shuffled controls (preserving dinucleotide frequencies) to find significantly enriched motifs.
+
+```{r}
+if (!file.exists("data/streme_results.rds")) {
+  streme <- memes::runStreme(
+   input = peak_seqs,
+   control = "shuffle", # the peak sequences will be compared to shuffled versions (with same dinucleotide frequency)
+   nmotifs=5 # determines how many motifs we will try to find
+  ) 
+  saveRDS(streme, "data/streme_results.rds")
+} else {
+  print("Loading STREME results from file...")
+  streme <- readRDS("data/streme_results.rds")
+}
+streme[,c("consensus", "pval", "nsites")]
+```
+
+We visualize the top discovered motif alongside the known REST motif.
+The de novo discovered motif closely matches the known REST binding motif.
+Few positions differ, but the general pattern is the same.
+
+```{r}
+view_motifs(c(to_list(streme[1,]), convert_motifs(rest_motif)))
+```
+
+# Results
+
+### 1. Peaks containing TF motif
+
+FIMO identified `r length(fimo_peaks)` peaks that show the REST motif.
+This results in `r length(fimo_peaks) / length(peak_seqs) * 100`% of all `r length(peak_seqs)` show the motif.
+
+### 2. Motifs bound by TF
+
+Using `motifmatchr`, we detected `r length(motifs_genome)` REST motifs in the mouse genome. Out of these motifs, `r sum(overlapsAny(peaks, motifs_genome))` overlap a ChIP-seq peak, whereas `r sum(!overlapsAny(peaks, motifs_genome))` do not. This means that `r sum(overlapsAny(peaks, motifs_genome)) / length(motifs_genome) * 100`% of the REST motifs in the genome are bound by REST in this experiment.
+
+Could be due to:
+- Large portion of motifs are likely not accessible (e.g. in heterochromatin)
+- ... (Question, ask in lecture)
