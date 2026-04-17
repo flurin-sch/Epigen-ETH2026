@@ -1,0 +1,122 @@
+---
+title: "ATAC-seq exploration practical"
+author: "Pierre-Luc"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(epiwraps)
+  library(AnnotationHub)
+  library(MotifDb)
+  library(memes)
+  library(universalmotif)
+  library(ensembldb)
+  library(ggplot2)
+})
+
+ah <- AnnotationHub(localHub=TRUE)
+ensdb <- ah[["AH89211"]] # mouse ensembldb object
+```
+
+
+## Download the data
+
+You can either start from the bam file:
+
+```{r, eval=FALSE}
+download.file("https://ethz-ins.org/content/w7/atac.chr19.bam", "atac.chr19.bam", mode="wb")
+download.file("https://ethz-ins.org/content/w7/atac.chr19.bam.bai", "atac.chr19.bam.bai", mode="wb")
+```
+
+Alternatively, if you're on a slow computer, you can also download the tracks that we're generating below, and then skip that step:
+```{r, eval=FALSE}
+download.file("https://ethz-ins.org/content/w7/w7_bw.zip", "w7_bw.zip")
+unzip("w7_bw.zip")
+```
+
+
+## Preparing tracks
+
+```{r}
+bam <- "atac.chr19.bam"
+
+# create a track using all fragments, computing the coverage at each position (and force Ensembl naming)
+epiwraps::bam2bw(bam, output_bw = "full_cov.bw", paired=TRUE, binWidth=10L, forceSeqlevelsStyle = "Ensembl")
+
+# create a track using all fragments, but computing the number of cuts/insertion sites at each position
+bam2bw(bam, output_bw = "full_cuts.bw", paired=TRUE, binWidth=1L, type="ends", 
+                 trim=4L, extend=3L, forceSeqlevelsStyle = "Ensembl")
+
+# create a track using only nucleosome-free fragments, computing coverage
+bam2bw(bam, output_bw = "NF_cov.bw", paired=TRUE, binWidth=5L, minFragLength=30, 
+       maxFragLength=120, forceSeqlevelsStyle = "Ensembl")
+
+# create a track using only nucleosome-free fragments, the number of cuts/insertion sites at each position
+bam2bw(bam, output_bw = "NF_cuts.bw", paired=TRUE, binWidth=1L, type="ends", minFragLength=30, 
+       maxFragLength=120, trim=4L, extend=3L, forceSeqlevelsStyle = "Ensembl")
+
+# create a track using only mono-nucleosome fragments, computing coverage
+bam2bw(bam, output_bw = "mono_cov.bw", paired=TRUE, binWidth=10L, minFragLength=140,
+       maxFragLength=220, forceSeqlevelsStyle = "Ensembl")
+
+# create a track using only the (10bp) centers of mono-nucleosome fragments
+bam2bw(bam, output_bw = "mono_centers.bw", paired=TRUE, binWidth=5L, minFragLength=140, trim=4L,
+       maxFragLength=220, type="center", extend=10L, forceSeqlevelsStyle = "Ensembl")
+```
+
+
+## Obtaining the sites with a CTCF motif
+
+```{r}
+# get CTCF motif
+motif <- MotifDb::query(MotifDb, c("CTCF","Mus"))[[1]]
+motif2 <- convert_motifs(motif, class="TFBSTools-PFMatrix")
+genome <- ah[["AH68356"]]
+# get the sequence for chr19:
+chr19 <- import(genome)["19"]
+
+# find motif matches across chr19
+moi <- motifmatchr::matchMotifs(motif2, chr19, out="positions", p.cutoff=1e-5)[[1]]
+# convert to GRanges
+moi <- as(setNames(moi,names(chr19)), "GRanges")
+```
+
+## Plotting signal around the motif occurences
+
+```{r, fig.width=8, fig.height=4}
+# we prepare the list of tracks
+tracks <- list.files(pattern="bw$")
+names(tracks) <- gsub("\\.bw","",basename(tracks))
+
+# extract signals around the motif occurences
+# we zoom in to 300bp around the motif centers, in windows of 5bp
+sm <- signal2Matrix(tracks, moi, w=5, extend=300)
+
+# plot the signals:
+plotEnrichedHeatmaps(sm, trim=0.95, multiScale = TRUE, axis_name = "0")
+```
+
+
+## Summarizing the signals
+
+To better visualize the relationship between signals, we can overlay them aggregated across regions:
+
+```{r}
+d <- meltSignals(sm[,c("NF_cuts", "mono_centers")])
+ggplot(d, aes(position, mean, colour=sample)) + geom_line(size=1.2)
+```
+
+## Signal around TSS
+
+We could also look at the pattern around the TSS
+
+```{r, fig.width=10, fig.height=6}
+# fetch the protein-coding TSS from chromosome 19
+txs <- transcripts(ensdb, filter=TxBiotypeFilter("protein_coding"))
+txs <- txs[seqnames(txs)=="19"]
+tss <- reduce(promoters(txs, upstream=0, downstream=1))
+tss.sm <- epiwraps::signal2Matrix(tracks, granges(tss), w=10, extend=1000)
+epiwraps::plotEnrichedHeatmaps(tss.sm, trim=0.95, colors=c("white","darkred"), multiScale=TRUE, axis_name="TSS")
+```
+

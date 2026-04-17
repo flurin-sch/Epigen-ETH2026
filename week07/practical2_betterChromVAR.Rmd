@@ -1,0 +1,123 @@
+---
+title: "Motif accessibility analysis using betterChromVAR"
+author: "Pierre-Luc"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(motifmatchr)
+  library(MotifDb)
+  library(universalmotif)
+  library(ggplot2)
+  library(sechm)
+  library(BSgenome.Mmusculus.UCSC.mm10)
+  library(limma)
+  library(betterChromVAR)
+})
+
+ah <- AnnotationHub(localHub=TRUE)
+ensdb <- ah[["AH89211"]] # mouse ensembldb object
+```
+
+## Getting 
+
+## Download the data
+
+For this practical, we are going to re-use the hippocampus ATAC-seq data from week 5:
+
+```{r, eval=FALSE}
+download.file("https://ethz-ins.org/content/mouse_mm38_hippocampus.peakCounts.SE.rds", "peakCounts.rds", mode="wb")
+```
+
+```{r}
+se <- readRDS("peakCounts.rds")
+```
+
+The object contains fragment counts in peaks across control and stressed samples.
+
+To build such an object, one can use the `peakCountsFromBAM` of `epiwraps`.
+Note that for what follows, it's important that the regions be similarly-sized.
+Before getting the counts, it's therefore recommended to resize the regions, e.g. 
+doing `resize(peaks, width=300, fix="center")`.
+
+## Annotate regions
+
+The first thing we need to do is figure out the GC content of the regions, as well as what motif matches each region. The first is easily done:
+
+```{r}
+# we restrict the regions to standard chromosomes and change the seq level style to match the genome
+se <- GenomeInfoDb::keepStandardChromosomes(se, pruning.mode = "coarse")
+seqlevelsStyle(se) <- "UCSC"
+se <- addGCBias(se, genome=BSgenome.Mmusculus.UCSC.mm10)
+# (to use a fasta file as genome, we could simply do genome=FaFile("path/to/genome.fasta") )
+```
+
+### Motif matches
+
+For motif annotations, we first need to get a list of motifs, and then scan the regions for matches to them.
+We could fetch motifs from the `MotifDb` package:
+
+```{r}
+# make sure you specify a collection, in order to avoid having redundant motifs:
+motifs <- query(MotifDb, "HOCOMOCOv13")
+```
+
+Alternatively, we could get the motifs from whatever source we like. What we often like to use in such analyses are 'archetypes', or non-redundant motifs representing clusters of TFs. We can for instance get those from HOCOMOCO v.14:
+
+```{r, eval=FALSE}
+download.file("https://hocomoco14.autosome.org/final_bundle/hocomoco14/H14CORE-CLUSTERED/H14CORE-CLUSTERED_pwm.tar.gz", "H14CORE_clusters.tar.gz")
+untar("H14CORE_clusters.tar.gz")
+lf <- list.files("H14CORE-CLUSTERED/pwm/", full=TRUE)
+archetypes_motifs <- lapply(lf, read_matrix, headers = ">", positions = "rows")
+```
+
+Either way, we have to convert the motifs to something that `motifmatchr` accepts:
+
+```{r, message=FALSE}
+motifs <- do.call(TFBSTools::PWMatrixList, convert_motifs(motifs, class="TFBSTools-PWMatrix"))
+names(motifs) <- make.unique(sapply(motifs, \(x) gsub("\\..+","",x@name)))
+```
+
+We can then scan regions for matches of the motifs:
+
+```{r}
+matches <- motifmatchr::matchMotifs(motifs, se, genome=BSgenome.Mmusculus.UCSC.mm10)
+matches
+```
+
+The results is also a SummarizedExperiment, where columns are the motifs and the rows are the regions, and the assay is a logical sparse matrix:
+
+```{r}
+assay(matches)[1:10,1:20]
+```
+
+## Get motifs deviations
+
+```{r}
+dev <- betterChromVAR(se, matches)
+dev
+```
+
+The output is also a SummarizedExperiment, this time with samples as columns and motifs as rows.
+The values represent the relative accessibility of each motif in each sample.
+
+## Differential analysis
+
+We can use these motif deviations to perform differential analysis:
+
+```{r}
+dev$group <- ifelse(grepl("FSS", colnames(dev)), "Stressed", "Control")
+design <- model.matrix(~group, data=as.data.frame(colData(dev)))
+fit <- eBayes(lmFit(assay(dev, "z"), design))
+res <- as.data.frame(topTable(fit, number = Inf))
+res$motif <- row.names(res)
+ggplot(res, aes(logFC, -log10(adj.P.Val), label=motif)) + geom_text()
+```
+
+We could visualize the top hits:
+
+```{r}
+sechm(dev, head(row.names(res)), gaps_at="group", assayName = "z")
+```
+
