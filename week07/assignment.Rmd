@@ -126,27 +126,30 @@ suppressPackageStartupMessages({
 ah <- AnnotationHub()
 ```
 
-# 1. Signal around REST motifs
+# 1. Signal around JUND motifs
 
 We first load the ATAC-seq data from chromosome 19.
 As we want to look at the insertion sites of nucleosome-free fragments, and the centers of nucleosome-containing fragments, we will only load these two tracks.
 
-```{r NF-cuts and mono-centers around REST motifs}
+```{r NF-cuts and mono-centers}
 # we prepare the list of tracks
 tracks <- list.files(path=".", recursive=TRUE, pattern="bw$")
 names(tracks) <- gsub("\\.bw","",basename(tracks))
 tracks1 <- tracks[grep("NF_cuts|mono_centers", tracks)]
 ```
 
-Now we query for the motif of the XXX transcription factor and then perform motif matching to find the positions of the motif across chromosome 19.
-
-```{r REST motif matching}
-# get TF motif
-motif <- MotifDb::query(MotifDb, c("XXX","Mus", "HOCOMOCO"))[[1]]
-motif2 <- convert_motifs(motif, class="TFBSTools-PFMatrix")
+```{r}
 genome <- ah[["AH68356"]]
 # get the sequence for chr19:
 chr19 <- import(genome)["19"]
+```
+
+Now we query for the motif of the JUND transcription factor and then perform motif matching to find the positions of the motif across chromosome 19.
+
+```{r JUND motif matching}
+# get TF motif
+motif <- MotifDb::query(MotifDb, c("JUND","Mus", "HOCOMOCO"))[[1]]
+motif2 <- convert_motifs(motif, class="TFBSTools-PFMatrix")
 
 # find motif matches across chr19
 moi <- motifmatchr::matchMotifs(motif2, chr19, out="positions", p.cutoff=1e-5)[[1]]
@@ -154,21 +157,22 @@ moi <- motifmatchr::matchMotifs(motif2, chr19, out="positions", p.cutoff=1e-5)[[
 moi <- as(setNames(moi,names(chr19)), "GRanges")
 ```
 
-Finally, we can plot the signal around the XXX motifs.
-In the mono_centers track, we can again see two distinct peaks to the left and right of the motif which correspond to the well-positioned nucleosomes flanking the REST motif.
+Finally, we can plot the signal around the JUND motifs.
+In the mono_centers track, we do not see the two distinct peaks to the left and right of the motif which corresponded to the well-positioned nucleosomes flanking the CTCF motif.
 The NF_cuts track shows the insertion sites of the transposase in nucleosome-free fragments. 
-We see clear peaks just to the left and right of the motif center. 
-This is due to the fact that the bound TF protects the DNA from transposition, and therefore the cuts are enriched just outside of the motif.
+We see peaks just to the left and right of the motif center but again not as strong as for CTCF.
+Generally, this is due to the fact that the bound TF protects the DNA from transposition, and therefore the cuts are enriched just outside of the motif.
 For TFs that bind more stably, the protection is stronger and the peaks in the NF_cuts track are more pronounced.
+This could suggest that JUND binding is less stable than CTCF binding.
 
-```{r plot signals around XXX motifs}
+```{r plot signals around JUND motifs}
 sm <- signal2Matrix(tracks1, moi, w=5, extend=250)
 
-# plot the signals:
+# plot the signalsœ:
 plotEnrichedHeatmaps(sm, trim=0.95, multiScale = TRUE, axis_name = "0", use_raster=TRUE)
 ```
 
-When overlaying both signals in the same plot, we can clearly see the nucleosome centers to the left and right of the motif as well as the footprint in the insertion track.
+When overlaying both signals in the same plot, we can't really see any nucleosome centers to the left and right of the motif but the footprint in the insertion track is clearly visible.
 
 ```{r}
 d <- meltSignals(sm[,c("NF_cuts", "mono_centers")])
