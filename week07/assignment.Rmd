@@ -1,0 +1,311 @@
+---
+title: "Assignment - Week 07"
+author: "Flurin Schindele"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    highlight: default
+    df_print: paged
+---
+
+<style type="text/css">
+
+body{
+  font-size: 13pt;
+}
+
+/* Main container - set position for TOC alignment */
+.main-container {
+    max-width: 940px;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+/* TOC box styling - elegant and light */
+.tocify {
+  width: 100%;
+  max-height: calc(100vh - 100px);
+  overflow-y: auto;
+  background: #fff;
+  padding: 10px 5px;
+  border: none;
+  border-left: 1px solid #ddd;
+  border-radius: 0;
+  box-shadow: none;
+  pointer-events: auto;
+}
+
+.tocify ul, .tocify li {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tocify-header {
+  text-indent: 0;
+}
+
+.tocify-subheader {
+  font-size: 90%;
+}
+
+.tocify a {
+  color: inherit;
+  text-decoration: none;
+  display: block;
+  cursor: pointer;
+}
+
+.tocify .list-group-item:hover {
+  background-color: transparent;
+  color: #555;
+  border-left: 2px solid #aaa;
+}
+
+.tocify .list-group-item.active {
+  background-color: transparent;
+  color: #333;
+  border-left: 2px solid #555;
+  font-weight: 500;
+}
+
+.tocify .list-group-item {
+  background-color: transparent;
+  border: none;
+  padding: 2px 8px 2px 10px;
+  margin: 0;
+  display: inline-block;
+  color: #888;
+  border-left: 2px solid transparent;
+  margin-left: -1px;
+  cursor: pointer;
+  line-height: 1.3;
+  /* Text wrapping for long headers */
+  white-space: normal;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+/* Subheader indentation */
+.tocify-subheader .list-group-item {
+  padding-left: 5px;
+}
+
+p.caption {
+  margin: 0 10px 0 10px;
+  font-style: italic;
+  font-size: 90%;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center", out.width = "75%")
+```
+
+```{r libraries}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+  library(ggrepel)
+  library(epiwraps)
+  library(AnnotationHub)
+  library(motifmatchr)
+  library(MotifDb)
+  library(universalmotif)
+  library(sechm)
+  library(Rsamtools)
+  library(limma)
+  library(betterChromVAR)
+})
+
+ah <- AnnotationHub()
+```
+
+# 1. Signal around REST motifs
+
+We first load the ATAC-seq data from chromosome 19.
+As we want to look at the insertion sites of nucleosome-free fragments, and the centers of nucleosome-containing fragments, we will only load these two tracks.
+
+```{r NF-cuts and mono-centers around REST motifs}
+# we prepare the list of tracks
+tracks <- list.files(path=".", recursive=TRUE, pattern="bw$")
+names(tracks) <- gsub("\\.bw","",basename(tracks))
+tracks1 <- tracks[grep("NF_cuts|mono_centers", tracks)]
+```
+
+Now we query for the motif of the XXX transcription factor and then perform motif matching to find the positions of the motif across chromosome 19.
+
+```{r REST motif matching}
+# get TF motif
+motif <- MotifDb::query(MotifDb, c("XXX","Mus", "HOCOMOCO"))[[1]]
+motif2 <- convert_motifs(motif, class="TFBSTools-PFMatrix")
+genome <- ah[["AH68356"]]
+# get the sequence for chr19:
+chr19 <- import(genome)["19"]
+
+# find motif matches across chr19
+moi <- motifmatchr::matchMotifs(motif2, chr19, out="positions", p.cutoff=1e-5)[[1]]
+# convert to GRanges
+moi <- as(setNames(moi,names(chr19)), "GRanges")
+```
+
+Finally, we can plot the signal around the XXX motifs.
+In the mono_centers track, we can again see two distinct peaks to the left and right of the motif which correspond to the well-positioned nucleosomes flanking the REST motif.
+The NF_cuts track shows the insertion sites of the transposase in nucleosome-free fragments. 
+We see clear peaks just to the left and right of the motif center. 
+This is due to the fact that the bound TF protects the DNA from transposition, and therefore the cuts are enriched just outside of the motif.
+For TFs that bind more stably, the protection is stronger and the peaks in the NF_cuts track are more pronounced.
+
+```{r plot signals around XXX motifs}
+sm <- signal2Matrix(tracks1, moi, w=5, extend=250)
+
+# plot the signals:
+plotEnrichedHeatmaps(sm, trim=0.95, multiScale = TRUE, axis_name = "0", use_raster=TRUE)
+```
+
+When overlaying both signals in the same plot, we can clearly see the nucleosome centers to the left and right of the motif as well as the footprint in the insertion track.
+
+```{r}
+d <- meltSignals(sm[,c("NF_cuts", "mono_centers")])
+ggplot(d, aes(position, mean, colour=sample)) + geom_line(size=1.2)
+```
+
+# 2. Differential accessibility
+
+Now we turn to the hippocampus data from stressed (forced swim stress) mice and we want to look at differentially accessible motifs between male and female mice.
+
+```{r load data}
+download.file("https://ethz-ins.org/content/mouse_mm38_hippocampus.peakCounts.SE.rds", "data/peakCounts.rds", mode="wb")
+se <- readRDS("data/peakCounts.rds")
+
+se <- GenomeInfoDb::keepStandardChromosomes(se, pruning.mode = "coarse")
+seqlevelsStyle(se) <- "UCSC"
+se <- betterChromVAR::addGCBias(se, genome=FaFile("../week06/data/mm10.fa"))
+```
+
+```{r get motifs}
+motifs <- query(MotifDb, "HOCOMOCOv13")
+motifs <- do.call(TFBSTools::PWMatrixList, convert_motifs(motifs, class="TFBSTools-PWMatrix"))
+names(motifs) <- make.unique(sapply(motifs, \(x) gsub("\\..+","",x@name)))
+```
+
+For each peak in the `se` object, we find out which motifs match it, and then we compute the relative accessibility of each motif in each sample.
+`matches` contains a logical sparse matrix of dimensions (number of peaks) x (number of motifs), where each entry indicates whether the motif matches the peak or not.
+
+```{r match motifs}
+matches <- motifmatchr::matchMotifs(motifs, se, genome=FaFile("../week06/data/mm10.fa"))
+matches
+assay(matches)[1:10, 1:25]
+```
+
+`dev` is of shape (number of motifs) x (number of samples).
+
+```{r compute deviations}
+dev <- betterChromVAR(se, matches)
+dev
+assay(dev)[1:5, c(1, 12)]
+```
+
+We can then fit a model to find motifs that are differentially accessible between sex, while controlling for the stressed/unstressed condition.
+
+```{r fit model}
+dev$sex <- ifelse(grepl("female", colnames(dev)), "Female", "Male")
+dev$condition <- ifelse(grepl("Control", colnames(dev)), "Control", "Stressed")
+design <- model.matrix(~sex + condition, data=as.data.frame(colData(dev)))
+fit <- eBayes(lmFit(assay(dev, "z"), design))
+res <- as.data.frame(topTable(fit, number = Inf))
+res$motif <- row.names(res)
+```
+
+```{r volcano plot sex, out.width = "90%"}
+colors <- c("up" = "#C04F15", "down" = "#5682A3", "ns" = "grey") 
+sizes <- c("up" = 2, "down" = 2, "ns" = 1) 
+alphas <- c("up" = 1, "down" = 1, "ns" = 0.5)
+
+res <- res %>%
+  mutate(type = case_when(
+    sexMale >= 1 & adj.P.Val <= 0.05 ~ "up",
+    sexMale <= -1 & adj.P.Val <= 0.05 ~ "down",
+    TRUE ~ "ns"
+    )
+)
+
+res$type <- factor(res$type, levels=c("up", "down", "ns"))
+ggplot(data = res,
+       aes(x = sexMale,
+           y = -log10(adj.P.Val))) + 
+  geom_point(aes(color = type,    
+                 size = type,
+                 alpha = type)) + 
+  geom_hline(yintercept = -log10(0.05),
+             linetype = "dashed") + 
+  geom_vline(xintercept = c(log2(0.5), log2(2)),
+             linetype = "dashed") +
+  geom_label_repel(data = res[res$type == "down" | res$type == "up", ], # Add labels last to appear as the top layer  
+                   aes(label = res$motif[res$type == "down" | res$type == "up"]),
+                   force = 2,
+                   nudge_y = 0.5) +
+  scale_colour_manual(values = colors) +
+  scale_size_manual(values = sizes) +
+  scale_alpha_manual(values = alphas)
+```
+
+We see that multiple motifs are less accessible in male mice compared to female mice.
+
+```{r heatmap}
+sechm(dev, row.names(res[res$type != "ns",]), gaps_at="sex", assayName = "z")
+```
+
+## Comparing stressed vs unstressed mice
+
+When we plot the same data but comparing stressed vs unstressed mice, we see that there are four motifs enriched in stressed mice.
+
+```{r volcano plot stressed vs unstressed, out.width = "90%"}
+colors <- c("up" = "#C04F15", "down" = "#5682A3", "ns" = "grey") 
+sizes <- c("up" = 2, "down" = 2, "ns" = 1) 
+alphas <- c("up" = 1, "down" = 1, "ns" = 0.5)
+
+res <- res %>%
+  mutate(type = case_when(
+    conditionStressed >= 1 & adj.P.Val <= 0.05 ~ "up",
+    conditionStressed <= -1 & adj.P.Val <= 0.05 ~ "down",
+    TRUE ~ "ns"
+    )
+)
+
+res$type <- factor(res$type, levels=c("up", "down", "ns"))
+ggplot(data = res,
+       aes(x = conditionStressed,
+           y = -log10(adj.P.Val))) + 
+  geom_point(aes(color = type,    
+                 size = type,
+                 alpha = type)) + 
+  geom_hline(yintercept = -log10(0.05),
+             linetype = "dashed") + 
+  geom_vline(xintercept = c(log2(0.5), log2(2)),
+             linetype = "dashed") +
+  geom_label_repel(data = res[res$type == "down" | res$type == "up", ], # Add labels last to appear as the top layer  
+                   aes(label = res$motif[res$type == "down" | res$type == "up"]),
+                   force = 2,
+                   nudge_y = 0.5) +
+  scale_colour_manual(values = colors) +
+  scale_size_manual(values = sizes) +
+  scale_alpha_manual(values = alphas)
+```
+
+The GCR motif being enriched makes sense biologically, as it is a motif for the glucocorticoid receptor which is activated in response to stress.
+The other motifs are similar to the GCR motif, and therefore likely represent the same underlying signal
+
+```{r motif visualization}
+view_motifs(motifs[c("GCR", "MCR", "PRGR", "ANDR.1")])
+```
+
+```{r sessionInfo}
+sessionInfo()
+```
+
