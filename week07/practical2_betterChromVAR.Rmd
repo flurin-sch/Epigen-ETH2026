@@ -115,6 +115,13 @@ res$motif <- row.names(res)
 ggplot(res, aes(logFC, -log10(adj.P.Val), label=motif)) + geom_text()
 ```
 
+```{r}
+view_motifs(motifs[head(row.names(res), 4])
+```
+
+The GCR motif makes sense biologically, the other motifs are simply very similar.
+This is another reason why it's often better to use archetypes, as they are non-redundant and represent clusters of similar motifs.
+
 We could visualize the top hits:
 
 ```{r}

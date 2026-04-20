@@ -9,7 +9,7 @@ suppressPackageStartupMessages({
   library(epiwraps)
   library(AnnotationHub)
   library(MotifDb)
-  library(memes)
+  #library(memes)
   library(universalmotif)
   library(ensembldb)
   library(ggplot2)
@@ -30,38 +30,39 @@ download.file("https://ethz-ins.org/content/w7/atac.chr19.bam.bai", "atac.chr19.
 ```
 
 Alternatively, if you're on a slow computer, you can also download the tracks that we're generating below, and then skip that step:
-```{r, eval=FALSE}
-download.file("https://ethz-ins.org/content/w7/w7_bw.zip", "w7_bw.zip")
-unzip("w7_bw.zip")
+```{r, eval=TRUE}
+dir.create("data", showWarnings = FALSE)
+download.file("https://ethz-ins.org/content/w7/w7_bw.zip", "data/w7_bw.zip")
+unzip("data/w7_bw.zip", exdir="data")
 ```
 
 
 ## Preparing tracks
 
 ```{r}
-bam <- "atac.chr19.bam"
+bam <- "data/atac.chr19.bam"
 
 # create a track using all fragments, computing the coverage at each position (and force Ensembl naming)
-epiwraps::bam2bw(bam, output_bw = "full_cov.bw", paired=TRUE, binWidth=10L, forceSeqlevelsStyle = "Ensembl")
+epiwraps::bam2bw(bam, output_bw = "data/full_cov.bw", paired=TRUE, binWidth=10L, forceSeqlevelsStyle = "Ensembl")
 
 # create a track using all fragments, but computing the number of cuts/insertion sites at each position
-bam2bw(bam, output_bw = "full_cuts.bw", paired=TRUE, binWidth=1L, type="ends", 
+bam2bw(bam, output_bw = "data/full_cuts.bw", paired=TRUE, binWidth=1L, type="ends", 
                  trim=4L, extend=3L, forceSeqlevelsStyle = "Ensembl")
 
 # create a track using only nucleosome-free fragments, computing coverage
-bam2bw(bam, output_bw = "NF_cov.bw", paired=TRUE, binWidth=5L, minFragLength=30, 
+bam2bw(bam, output_bw = "data/NF_cov.bw", paired=TRUE, binWidth=5L, minFragLength=30, 
        maxFragLength=120, forceSeqlevelsStyle = "Ensembl")
 
 # create a track using only nucleosome-free fragments, the number of cuts/insertion sites at each position
-bam2bw(bam, output_bw = "NF_cuts.bw", paired=TRUE, binWidth=1L, type="ends", minFragLength=30, 
+bam2bw(bam, output_bw = "data/NF_cuts.bw", paired=TRUE, binWidth=1L, type="ends", minFragLength=30, 
        maxFragLength=120, trim=4L, extend=3L, forceSeqlevelsStyle = "Ensembl")
 
 # create a track using only mono-nucleosome fragments, computing coverage
-bam2bw(bam, output_bw = "mono_cov.bw", paired=TRUE, binWidth=10L, minFragLength=140,
+bam2bw(bam, output_bw = "data/mono_cov.bw", paired=TRUE, binWidth=10L, minFragLength=140,
        maxFragLength=220, forceSeqlevelsStyle = "Ensembl")
 
 # create a track using only the (10bp) centers of mono-nucleosome fragments
-bam2bw(bam, output_bw = "mono_centers.bw", paired=TRUE, binWidth=5L, minFragLength=140, trim=4L,
+bam2bw(bam, output_bw = "data/mono_centers.bw", paired=TRUE, binWidth=5L, minFragLength=140, trim=4L,
        maxFragLength=220, type="center", extend=10L, forceSeqlevelsStyle = "Ensembl")
 ```
 
@@ -84,9 +85,9 @@ moi <- as(setNames(moi,names(chr19)), "GRanges")
 
 ## Plotting signal around the motif occurences
 
-```{r, fig.width=8, fig.height=4}
+```{r}
 # we prepare the list of tracks
-tracks <- list.files(pattern="bw$")
+tracks <- list.files(path=".", recursive=TRUE, pattern="bw$")
 names(tracks) <- gsub("\\.bw","",basename(tracks))
 
 # extract signals around the motif occurences
@@ -94,9 +95,19 @@ names(tracks) <- gsub("\\.bw","",basename(tracks))
 sm <- signal2Matrix(tracks, moi, w=5, extend=300)
 
 # plot the signals:
-plotEnrichedHeatmaps(sm, trim=0.95, multiScale = TRUE, axis_name = "0")
+plotEnrichedHeatmaps(sm, trim=0.95, multiScale = TRUE, axis_name = "0", use_raster=TRUE, raster_device="png")
 ```
 
+
+Mono centers:
+no enrichment of mono-center reads around CTCF motifs, but sharp peaks to left and right -> well positioned nucleosomes
+Nucleosome can move on DNA, slide along. When CTCF binds, it can move/displace the nucleosome 
+well-positioned nucleosome is in the same position over different cells with same state
+
+NF cuts: 
+TF footprint shown by signal free region
+degree depends on binding strength of TF to DNA, stronger/longer binding (long residence time)-> stronger footprint which is the case for CTCF, binding over multiple seconds into minutes which is really long
+often TF binds for milliseconds, after this time Tn5 can insert and create a cut -> weak footprint
 
 ## Summarizing the signals
 
