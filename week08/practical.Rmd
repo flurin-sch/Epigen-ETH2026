@@ -1,0 +1,224 @@
+---
+title: "DNA methylation and enrichment analysis"
+author: "Emanuel / Pierre-Luc"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup}
+suppressPackageStartupMessages({
+  library(epiwraps)
+  library(ggplot2)
+  library(AnnotationHub)
+  library(ensembldb)
+  library(edgeR)
+  library(rtracklayer)
+  library(BiocParallel)
+  library(bsseq)   # Class and tools to analyze bisulfite sequencing data at CpG-level
+  library(DMRcate) # Identification of differentially-methylated regions
+})
+```
+
+# Comparing DNAme to other epigenomic signals
+
+## Load the data
+
+Download:
+
+```{r, download, eval=FALSE}
+options(timeout = 6000)
+download.file("https://ethz-ins.org/content/w11_practical.zip", "w11_practical.zip")
+unzip("w11_practical.zip")
+```
+
+We have ATAC signal and 3 histone modifications as bigwig files (all limited to chr1),
+but the DNA methylation data we have in GRanges format (methylation % for each CpG):
+
+```{r, load bigwigs}
+DNAme <- readRDS("comparison/DNAme.rds")
+tracks <- list(ATAC="comparison/ATAC.bw",
+               H3K27ac="comparison/H3K27ac.bw",
+               H3K4me3="comparison/H3K4me3.bw",
+               DNAme=DNAme)
+```
+
+When visualizing DNAme data, we have 
+
+### Load the gene annotation data
+
+```{r, annotation}
+ah <- AnnotationHub()
+ensdb <- ah[["AH89211"]] # GRCm38
+```
+
+Obtaining the promoter coordinates of chromosome 1:
+
+```{r, load promoters}
+chr1 <-  GRanges(seqnames=Rle(c("1")), 
+                 ranges = IRanges(1, end=195471971))
+
+# We define promoters as the regions +/- 200 of the TSS
+promoterRegions <- promoters(ensdb, upstream=200, downstream=200,
+                             filter=GRangesFilter(chr1), columns=c("gene_name"))
+head(promoterRegions)
+```
+
+gene body coordinates: 
+```{r, load gene bodies}
+geneBodies <- genes(ensdb, filter=GRangesFilter(chr1))
+```
+
+
+
+## Visualizing the different epigenomic signals
+
+### At promoters
+
+```{r}
+seqlevelsStyle(promoterRegions) <- "UCSC"
+# for the sake of speed, we'll plot only the first 2000 promoters
+smp <- signal2Matrix(tracks, promoterRegions[1:2000], 
+                     extend=1000, w=20, 
+                     limit=c(0,100),
+                     smooth=TRUE)
+plotEnrichedHeatmaps(smp, 
+                     axis_name="TSS",
+                     multiScale=TRUE)
+```
+
+### Gene bodies
+
+```{r}
+seqlevelsStyle(geneBodies) <- "UCSC"
+# for the sake of speed, we'll plot only the first 2000 gene bodies
+smg <- signal2Matrix(tracks, geneBodies[1:2000], 
+                       extend=1000, w=20, 
+                       type="scaled", 
+                       limit=c(0,100),
+                       smooth=TRUE)
+
+plotEnrichedHeatmaps(smg, multiScale=TRUE)
+```
+
+
+### TF binding sites
+
+```{r}
+bindingSites <- import.bed("comparison/CTCF_peaks.bed")
+
+smTfbs <- signal2Matrix(list(DNAme=DNAme), 
+                        bindingSites, 
+                        extend=100, 
+                        w=20, 
+                        limit=c(0,100),
+                        type="scale", 
+                        smooth=TRUE)
+plotEnrichedHeatmaps(smTfbs, 
+                     axis_name = c("peak_start", "peak_end"),
+                     use_raster=TRUE)
+```
+
+
+# Differential Methylation Testing
+
+## Bsseq object
+
+We will use a BSseq object that contains data from embryonic stem cells (ESC) and astrocytes.
+
+```{r}
+bs <- readRDS("ESC_astrocytes_BSseq.rds")
+bs
+
+# remove CpGs that have 0 coverage in some samples:
+bs <- bs[rowSums(assay(bs,"Cov")>0)==ncol(bs),]
+
+design <- model.matrix(~celltype, data=pData(bs)) 
+design
+# adapt the design for methylation data:
+methdesign <- modelMatrixMeth(design)
+
+bs <- BSmooth(bs, BPPARAM=MulticoreParam(4, progress=TRUE))
+```
+
+
+## Extracting average methylation in regions of interest
+
+```{r}
+# we get the chr1 promoters for this genome:
+genes <- readRDS("hg19_chr1_genes.rds")
+proms <- promoters(genes)
+
+# we extract the promoters of genes of interest:
+myPromoters <- proms[c("GPR25", "MXRA8", "PLCH2", "GJC2", "PEAR1", "HSPG2")]
+metPr <- bsseq::getMeth(bs, regions=myPromoters, what="perRegion")
+rownames(metPr) <- myPromoters$symbol
+
+# we plot their average methylation ratio across samples:
+pheatmap(metPr, name="promoter\nmethylation")
+```
+
+## Statistical testing
+
+### Testing each CpG individually
+
+```{r}
+# CpG-level tests:
+seqAnnot <- sequencing.annotate(bs, methdesign, all.cov=TRUE, coef="celltypeastrocytes")
+
+# look at the top most significant CpGs:
+res <- seqAnnot@ranges
+res <- res[order(res$ind.fdr),]
+head(res)
+
+# visualize them across samples:
+metCpGs <- bsseq::getMeth(bs, regions=head(res,20), what="perRegion")
+colnames(metCpGs) <- colnames(bs)
+pheatmap(metCpGs, name="methylation")
+```
+
+### Differentially-methylated regions (DMRs)
+
+Identifying broader regions of coherent changes:
+
+```{r}
+dmrcateRes <- dmrcate(seqAnnot, C=2, min.cpgs=5)
+dmrRanges <- extractRanges(dmrcateRes, genome="hg19")
+saveRDS(dmrRanges, "dmr.rds")
+
+ggplot(as.data.frame(dmrRanges), aes(meandiff, -log10(HMFDR), colour=width, size=no.cpgs)) + geom_point()
+
+dmrRanges <- dmrRanges[order(abs(dmrRanges$meandiff), decreasing=TRUE)]
+DMR.plot(dmrRanges, dmr=2, phen.col=rep(c("blue","darkred"), each=2), 
+         arraytype="450K", # because of a bug in the newest version of DMRcate, we need to specify the array type here, even though we are working with BSseq data
+         CpGs=bs, genome="hg19")
+```
+
+```{r}
+bsseq::plotRegion(bs, region = dmrRanges[2], extend=1000, col=rep(c("darkblue","darkred"),each=2))
+```
+
+
+
+### From a BSseq object to inputs for epiwraps
+
+We could also plot using `epiwraps`. To this end, we must first convert the `BSseq` object back to a list of CpGs and their methylation percentages:
+
+```{r}
+DNAme_list <- lapply(setNames(colnames(bs),colnames(bs)), FUN=function(x){
+  g <- granges(bs)
+  g$score <- as.integer(round(100*assay(bs, "M")[,x]/assay(bs, "Cov")[,x]))
+  g})
+
+smDmrs <- signal2Matrix(DNAme_list, 
+                        dmrRanges,
+                        extend=1000, w=20, limit=c(0,100),
+                        type="scale", smooth=TRUE)
+colData(smDmrs)$group <- unlist(lapply(strsplit(names(DNAme_list), split="_"), "[", 1))
+plotEnrichedHeatmaps(smDmrs, 
+                     axis_name = c("dmr_start", "dmr_end"),
+                     use_raster=TRUE)
+# top_annotation=HeatmapAnnotation(Group=colData(smDmrs)$group)
+```
+
+This could then be used as input for `signal2Matrix()`.
