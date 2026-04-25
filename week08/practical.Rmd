@@ -28,18 +28,19 @@ Download:
 
 ```{r, download, eval=FALSE}
 options(timeout = 6000)
-download.file("https://ethz-ins.org/content/w11_practical.zip", "w11_practical.zip")
-unzip("w11_practical.zip")
+dir.create("data", showWarnings = FALSE)
+download.file("https://ethz-ins.org/content/w11_practical.zip", "data/w11_practical.zip")
+unzip("data/w11_practical.zip", exdir="data")
 ```
 
 We have ATAC signal and 3 histone modifications as bigwig files (all limited to chr1),
-but the DNA methylation data we have in GRanges format (methylation % for each CpG):
+but the DNA methylation data we have in GRanges format (methylation % for each CpG over all reads at this position):
 
 ```{r, load bigwigs}
-DNAme <- readRDS("comparison/DNAme.rds")
-tracks <- list(ATAC="comparison/ATAC.bw",
-               H3K27ac="comparison/H3K27ac.bw",
-               H3K4me3="comparison/H3K4me3.bw",
+DNAme <- readRDS("data/comparison/DNAme.rds")
+tracks <- list(ATAC="data/comparison/ATAC.bw",
+               H3K27ac="data/comparison/H3K27ac.bw",
+               H3K4me3="data/comparison/H3K4me3.bw",
                DNAme=DNAme)
 ```
 
@@ -81,11 +82,14 @@ seqlevelsStyle(promoterRegions) <- "UCSC"
 smp <- signal2Matrix(tracks, promoterRegions[1:2000], 
                      extend=1000, w=20, 
                      limit=c(0,100),
-                     smooth=TRUE)
+                     smooth=TRUE) # needed for methylation data as signal is very sparse
 plotEnrichedHeatmaps(smp, 
                      axis_name="TSS",
                      multiScale=TRUE)
 ```
+
+Shows exclusivity of accessible histone marks + ATAC signal and the DNA methlyation at the promoters.
+Also shows the well-positioned +1 nucleosomes downstream of the TSS (H3K4me3 and H3K27ac). The ATAC signal is shifted to the left, as this shows us open chromatin which is exclusive with a histone mark.
 
 ### Gene bodies
 
@@ -101,11 +105,13 @@ smg <- signal2Matrix(tracks, geneBodies[1:2000],
 plotEnrichedHeatmaps(smg, multiScale=TRUE)
 ```
 
+With `background=NA` we see the raw data. By default, a value is imputed for the sites where there is not signal because there is no CpG site.
+
 
 ### TF binding sites
 
 ```{r}
-bindingSites <- import.bed("comparison/CTCF_peaks.bed")
+bindingSites <- import.bed("data/comparison/CTCF_peaks.bed")
 
 smTfbs <- signal2Matrix(list(DNAme=DNAme), 
                         bindingSites, 
@@ -127,7 +133,7 @@ plotEnrichedHeatmaps(smTfbs,
 We will use a BSseq object that contains data from embryonic stem cells (ESC) and astrocytes.
 
 ```{r}
-bs <- readRDS("ESC_astrocytes_BSseq.rds")
+bs <- readRDS("data/ESC_astrocytes_BSseq.rds")
 bs
 
 # remove CpGs that have 0 coverage in some samples:
@@ -146,7 +152,7 @@ bs <- BSmooth(bs, BPPARAM=MulticoreParam(4, progress=TRUE))
 
 ```{r}
 # we get the chr1 promoters for this genome:
-genes <- readRDS("hg19_chr1_genes.rds")
+genes <- readRDS("data/hg19_chr1_genes.rds")
 proms <- promoters(genes)
 
 # we extract the promoters of genes of interest:
@@ -184,7 +190,7 @@ Identifying broader regions of coherent changes:
 ```{r}
 dmrcateRes <- dmrcate(seqAnnot, C=2, min.cpgs=5)
 dmrRanges <- extractRanges(dmrcateRes, genome="hg19")
-saveRDS(dmrRanges, "dmr.rds")
+saveRDS(dmrRanges, "data/dmr.rds")
 
 ggplot(as.data.frame(dmrRanges), aes(meandiff, -log10(HMFDR), colour=width, size=no.cpgs)) + geom_point()
 
