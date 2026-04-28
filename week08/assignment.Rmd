@@ -1,0 +1,350 @@
+---
+title: "Assignment - Week 08"
+author: "Flurin Schindele"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    highlight: default
+    df_print: paged
+---
+
+<style type="text/css">
+
+body{
+  font-size: 13pt;
+}
+
+/* Main container - set position for TOC alignment */
+.main-container {
+    max-width: 940px;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+/* TOC box styling - elegant and light */
+.tocify {
+  width: 100%;
+  max-height: calc(100vh - 100px);
+  overflow-y: auto;
+  background: #fff;
+  padding: 10px 5px;
+  border: none;
+  border-left: 1px solid #ddd;
+  border-radius: 0;
+  box-shadow: none;
+  pointer-events: auto;
+}
+
+.tocify ul, .tocify li {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tocify-header {
+  text-indent: 0;
+}
+
+.tocify-subheader {
+  font-size: 90%;
+}
+
+.tocify a {
+  color: inherit;
+  text-decoration: none;
+  display: block;
+  cursor: pointer;
+}
+
+.tocify .list-group-item:hover {
+  background-color: transparent;
+  color: #555;
+  border-left: 2px solid #aaa;
+}
+
+.tocify .list-group-item.active {
+  background-color: transparent;
+  color: #333;
+  border-left: 2px solid #555;
+  font-weight: 500;
+}
+
+.tocify .list-group-item {
+  background-color: transparent;
+  border: none;
+  padding: 2px 8px 2px 10px;
+  margin: 0;
+  display: inline-block;
+  color: #888;
+  border-left: 2px solid transparent;
+  margin-left: -1px;
+  cursor: pointer;
+  line-height: 1.3;
+  /* Text wrapping for long headers */
+  white-space: normal;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+/* Subheader indentation */
+.tocify-subheader .list-group-item {
+  padding-left: 5px;
+}
+
+p.caption {
+  margin: 0 10px 0 10px;
+  font-style: italic;
+  font-size: 90%;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center", out.width = "75%")
+```
+
+```{r packages, message=FALSE, warning=FALSE}
+suppressPackageStartupMessages({
+  library(epiwraps)
+  library(ggplot2)
+  library(AnnotationHub)
+  library(ensembldb)
+  library(rtracklayer)
+  library(GenomicRanges)
+  library(GenomeInfoDb)
+  # library(edgeR)
+  library(BiocParallel)
+  library(bsseq)   # Class and tools to analyze bisulfite sequencing data at CpG-level
+  library(DMRcate) # Identification of differentially-methylated regions
+})
+```
+
+# Plotting DNAme of genes in top 5 DMR
+
+We first load the differentially methylation region data, as well as BSseq object containing the methlyation signal. We also apply smoothing like in the tutorial. 
+
+```{r}
+dmr <- readRDS("data/dmr.rds")
+head(dmr)
+```
+
+```{r}
+if (!file.exists("data/ESC_astrocytes_BSseq_smoothed.rds")) {
+  bs <- readRDS("data/ESC_astrocytes_BSseq.rds")
+  bs <- bs[rowSums(assay(bs,"Cov")>0)==ncol(bs),]
+  bs <- BSmooth(bs, BPPARAM=MulticoreParam(4, progress=FALSE))
+  saveRDS(bs, "data/ESC_astrocytes_BSseq_smoothed.rds")
+} else {
+  bs <- readRDS("data/ESC_astrocytes_BSseq_smoothed.rds")
+}
+bs
+```
+
+We subset to chromosome 1 and select the top 5 DMRs by HMFDR, then find genes that overlap these regions and plot their methylation levels across samples.
+
+```{r}
+# get regions from chromosome 1
+roi <- dmr[seqnames(dmr) == "chr1"]
+roi <- roi[order(roi$HMFDR)][1:5]
+head(roi)
+
+# get genes that overlap regions of interest
+genes <- readRDS("data/hg19_chr1_genes.rds")
+genes_oi <- subsetByOverlaps(genes, roi, ignore.strand=TRUE, type="any")
+genes_oi
+```
+
+```{r}
+metROI <- bsseq::getMeth(bs, regions=genes_oi, what="perRegion")
+rownames(metROI) <- genes_oi$symbol
+
+pheatmap(metROI, 
+         name = "Methylation", 
+         main = "Methylation Levels of Genes in Top 5 DMRs (Chr1)",
+         show_rownames = TRUE,
+         color = colorRampPalette(c("blue", "white", "red"))(50))
+```
+
+Interestingly, this approach only shows on gene. The top 5 DMRs also show 2 other genes but they were not found in the hg19 genes.
+We will try again with a larger set of DMRs.
+
+```{r}
+# get regions from chromosome 1
+roi20 <- dmr[seqnames(dmr) == "chr1"]
+roi20 <-roi20[order(roi20$HMFDR)][1:20]
+tail(roi20)
+
+# get genes that overlap regions of interest
+genes_oi20 <- subsetByOverlaps(genes, roi20, ignore.strand=TRUE, type="any")
+genes_oi20$symbol
+```
+
+```{r}
+metROI20 <- bsseq::getMeth(bs, regions=genes_oi20, what="perRegion")
+rownames(metROI20) <- genes_oi20$symbol
+
+pheatmap(metROI20, 
+         name = "Methylation", 
+         main = "Methylation Levels of Genes in Top 20 DMRs (Chr1)",
+         show_rownames = TRUE,
+         color = colorRampPalette(c("blue", "white", "red"))(50))
+```
+
+The first few regions show very distinct methylation profiles between conditions witih ESCs showing higher methylation levels than astrocytes.
+
+# Agreement between DNAme and ATAC
+
+We first load the data and then rebuild the object as there seems to be some bug present.
+
+```{r}
+atac_path <- "data/ATAC_AstroVsESC_subset.rds"
+if (!file.exists(atac_path)) {
+  download.file(
+    "https://www.ethz-ins.org/content/ATAC_AstroVsESC_subset.rds",
+    destfile = atac_path,
+    mode = "wb"
+  )
+}
+atac_da_raw <- readRDS(atac_path)
+
+# Rebuild as a plain GRanges to avoid legacy Seqinfo class issues across Bioc versions.
+atac_df <- as.data.frame(atac_da_raw)
+atac_da <- GRanges(
+  seqnames = atac_df$seqnames,
+  ranges = IRanges(atac_df$start, atac_df$end),
+  strand = atac_df$strand
+)
+mcols(atac_da) <- S4Vectors::DataFrame(
+  atac_df[, setdiff(colnames(atac_df), c("seqnames", "start", "end", "width", "strand")), drop=FALSE]
+)
+atac_da
+```
+
+We then query the gene annotations from Ensembl, subset to protein-coding genes, and define promoter and gene body regions. We will then compare the DMRs and ATAC peaks that overlap these regions, and compute agreement metrics.
+
+```{r}
+ah <- AnnotationHub()
+ensdb <- ah[["AH119325"]]
+genes <- genes(ensdb)[genes(ensdb)$gene_biotype == "protein_coding"]
+genes <- keepStandardChromosomes(genes, pruning.mode="coarse")
+seqlevelsStyle(genes) <- "UCSC"
+
+promoters <- promoters(genes, upstream=2000, downstream=500)
+gene_bodies <- genes
+```
+
+All ATAC peaks overlap with DMRs and roughly 97% of DMRs overlap with ATAC peaks, which is a very high degree of overlap.
+
+```{r}
+prop_overlap <- function(query_peaks, subject_peaks) {
+  mean(overlapsAny(query_peaks, subject_peaks))
+}
+prop_overlap(atac_da, dmr)
+prop_overlap(dmr, atac_da)
+```
+
+```{r}
+summarize_region_agreement <- function(region_gr, region_label, dmr_gr, atac_gr) {
+  # first get signals that overlap the regions of interest (promoters or gene bodies)
+  dmr_sub <- subsetByOverlaps(dmr_gr, region_gr, ignore.strand=TRUE)
+  atac_sub <- subsetByOverlaps(atac_gr, region_gr, ignore.strand=TRUE)
+  # we also get the overlaps between the DMRs and ATAC peaks to compare their signal directly
+  ov <- findOverlaps(dmr_sub, atac_sub, ignore.strand=TRUE)
+  
+  if (length(ov) == 0) {
+    return(list(
+      comp = data.frame(),
+      metrics = data.frame(
+        region_type = region_label,
+        overlap_coefficient_pct = NA_real_,
+        pearson_cor = NA_real_,
+        spearman_cor = NA_real_
+      )
+    ))
+  }
+  
+  ov_df <- data.frame(
+    dmr_ix = queryHits(ov),
+    # get mean difference in methylation and HMFDR for the DMRs that overlap ATAC peaks
+    dmr_meandiff = dmr_sub$meandiff[queryHits(ov)],
+    dmr_HMFDR = dmr_sub$HMFDR[queryHits(ov)],
+    # get logFC and FDR for the ATAC peaks that overlap DMRs
+    atac_logFC = atac_sub$logFC[subjectHits(ov)],
+    atac_FDR = atac_sub$FDR[subjectHits(ov)]
+  )
+  
+  dmr_comp <- data.frame(
+    dmr_ix = as.integer(names(tapply(ov_df$atac_logFC, ov_df$dmr_ix, mean, na.rm=TRUE))),
+    # extract mean atac logFC for each DMR by averaging across all overlapping ATAC peaks
+    atac_logFC_mean = as.numeric(tapply(ov_df$atac_logFC, ov_df$dmr_ix, mean, na.rm=TRUE)),
+    atac_FDR_min = as.numeric(tapply(ov_df$atac_FDR, ov_df$dmr_ix, min, na.rm=TRUE)),
+    n_atac_peaks = as.integer(table(ov_df$dmr_ix))
+  )
+  
+  dmr_comp$dmr_meandiff <- dmr_sub$meandiff[dmr_comp$dmr_ix]
+  dmr_comp$dmr_HMFDR <- dmr_sub$HMFDR[dmr_comp$dmr_ix]
+  dmr_comp$region_type <- region_label
+  # If both methylation and accessibility changes are in the same direction (both positive or both negative), we call it "agree", otherwise "disagree"
+  dmr_comp$signal_change <- ifelse(sign(dmr_comp$dmr_meandiff) == sign(dmr_comp$atac_logFC_mean),
+                               "agree", "disagree")
+  
+  # Calculate both pearson and spearman correlation between methylation changes and mean ATAC logFC across overlapping regions
+  corr_pearson <- cor(dmr_comp$dmr_meandiff, dmr_comp$atac_logFC_mean, method="pearson")
+  corr_spearman <- cor(dmr_comp$dmr_meandiff, dmr_comp$atac_logFC_mean, method="spearman")
+  
+  list(
+    comp = dmr_comp,
+    metrics = data.frame(
+      region_type = region_label,
+      pearson_cor = corr_pearson,
+      spearman_cor = corr_spearman
+    )
+  )
+}
+
+promoter_res <- summarize_region_agreement(promoters, "Promoters", dmr, atac_da)
+gene_body_res <- summarize_region_agreement(gene_bodies, "Gene bodies", dmr, atac_da)
+region_comp <- rbind(promoter_res$comp, gene_body_res$comp)
+
+region_comp$signal_change <- factor(region_comp$signal_change, levels=c("agree", "disagree"))
+region_comp$region_type <- factor(region_comp$region_type, levels=c("Promoters", "Gene bodies"))
+region_comp
+```
+
+```{r}
+ggplot(region_comp, aes(x=dmr_meandiff, y=atac_logFC_mean, color=signal_change, size=n_atac_peaks)) +
+  geom_hline(yintercept=0, linetype="dashed", color="grey70") +
+  geom_vline(xintercept=0, linetype="dashed", color="grey70") +
+  geom_point(alpha=0.8) +
+  scale_color_manual(values=c(agree="#1b9e77", disagree="#d95f02")) +
+  facet_wrap(~region_type) +
+  labs(
+    x="DMR methylation change (meandiff; astrocyte vs ESC)",
+    y="Mean ATAC logFC of overlapping peaks (astrocyte vs ESC)",
+    color="Direction",
+    size="# overlapping\nATAC peaks",
+    title="Comparison of differential methylation and accessibility"
+  ) +
+  theme_classic()
+```
+
+The plots shos us that there seems to be some disagreement between methlation and accessibility both at the promoters where we would expect it and the gene bodies as well.
+
+In gene bodies, the opposite effect of methylation and accessibility is more pronounced, with most points showing decreasing methylation co-occurring with increased accessibility. At promoters, there is also a tendency for opposite-direction changes, but there are more points showing agreement between methylation and accessibility changes compared to gene bodies.
+
+```{r}
+agree_summary <- as.data.frame(prop.table(table(region_comp$region_type, region_comp$signal_change), 1))
+colnames(agree_summary) <- c("region_type", "direction", "fraction")
+agree_summary
+```
+
+```{r}
+region_metrics <- rbind(promoter_res$metrics, gene_body_res$metrics)
+region_metrics
+```
+
+Both correlation metrics show a negative correlation of methlyation and accessibility, which hints at (limited) exclusivity of signals.
