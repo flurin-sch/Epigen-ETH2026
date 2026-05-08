@@ -1,0 +1,135 @@
+---
+title: "Clustering and enrichment analysis"
+author: "Pierre-Luc"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(epiwraps)
+  library(ggplot2)
+  library(rGREAT) # Gene Ontology enrichment among genomic regions
+})
+```
+
+Today we're going to work on ChIP-seq of 2 TFs and 2 histone modifications in a mouse cancer line (all restricted to chr1).
+
+## Download the data
+
+```{r, eval=FALSE}
+options(timeout = 6000)
+download.file("https://ethz-ins.org/content/clustering_practical.zip", "clustering_practical.zip")
+unzip("clustering_practical.zip")
+list.files()
+```
+
+## Prepare the regions and the tracks
+
+```{r}
+tracks <- list.files(pattern="bw$")
+regions <- rtracklayer::import.bed("regions.bed")
+```
+
+## Plot
+
+```{r}
+ese <- signal2Matrix(tracks, regions, extend=2000)
+plotEnrichedHeatmaps(ese)
+ese2 <- ese[1:1000,]
+plotEnrichedHeatmaps(ese2, cluster_rows = TRUE, show_row_dend=TRUE )
+```
+
+## Clustering
+
+```{r}
+set.seed(123)  # to ensure that it gives the same results everytime
+cl <- clusterSignalMatrices(ese, k=4)
+table(cl)
+head(cl)
+length(cl)
+nrow(ese)
+
+# to make sure the cluster labels stay associated with the corresponding regions/rows
+# even if we manipulate the object, put them inside the rowData of the object:
+rowData(ese)$cluster <- cl
+head(rowData(ese))
+```
+
+
+
+
+
+Plotting the clusters:
+
+```{r}
+#plotEnrichedHeatmaps(ese, row_split="cluster", colors=c("white","darkred"))
+plotEnrichedHeatmaps(ese, row_split=rowData(ese)$cluster, 
+                     colors=c("white","darkred"))
+```
+
+
+
+Adding colors:
+
+```{r}
+mycolors <- c("1"="red", "2"="blue", "3"="darkgreen", "4"="black")
+plotEnrichedHeatmaps(ese, row_split="cluster", mean_color=mycolors, colors=c("white","darkred"))
+```
+
+
+Trying different numbers of clusters:
+
+
+```{r}
+cl2 <- clusterSignalMatrices(ese, k=2:10)
+ggplot(cl2$varExplained, aes(k, varExplained)) + geom_line()
+```
+
+
+
+Plotting just the averages:
+
+```{r}
+d <- meltSignals(ese, splitBy=cl)
+ggplot(d, aes(position, mean, colour=sample)) + geom_line(size=1.2) + facet_wrap(~split)
+```
+
+
+
+
+Clustering using relative signal instead:
+
+```{r}
+set.seed(123)
+cl <- clusterSignalMatrices(ese, k=4, scaleRows = TRUE)
+d <- meltSignals(ese, splitBy=cl)
+ggplot(d, aes(position, mean, colour=sample)) + geom_line() + facet_wrap(~split)
+plotEnrichedHeatmaps(ese, row_split = cl, scale_rows = "global")
+```
+
+
+## Enrichment analysis
+
+Find what's enriched in one cluster with respect to the others:
+
+```{r}
+# we first split the regions by cluster:
+split_regions <- split(rowRanges(ese), rowData(ese)$cluster)
+lengths(split_regions)
+
+res <- great(split_regions[["3"]], gene_sets="GO:BP", tss_source="mm10", 
+             background=regions, cores=2)
+bp <- getEnrichmentTables(res)
+head(bp)
+
+```
+
+We plot the top Biological Processes:
+
+```{r, fig.width=9, fig.height=6}
+ggplot(head(bp,15), aes(fold_enrichment, reorder(description, p_adjust), 
+                        size=observed_region_hits, color=-log10(p_adjust))) + 
+  geom_point() + scale_color_viridis_c()
+```
+
