@@ -1,0 +1,216 @@
+---
+title: "Assignment - Week 09"
+author: "Flurin Schindele"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    highlight: default
+    df_print: paged
+---
+
+<style type="text/css">
+
+body{
+  font-size: 13pt;
+}
+
+/* Main container - set position for TOC alignment */
+.main-container {
+    max-width: 940px;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+/* TOC box styling - elegant and light */
+.tocify {
+  width: 100%;
+  max-height: calc(100vh - 100px);
+  overflow-y: auto;
+  background: #fff;
+  padding: 10px 5px;
+  border: none;
+  border-left: 1px solid #ddd;
+  border-radius: 0;
+  box-shadow: none;
+  pointer-events: auto;
+}
+
+.tocify ul, .tocify li {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.tocify-header {
+  text-indent: 0;
+}
+
+.tocify-subheader {
+  font-size: 90%;
+}
+
+.tocify a {
+  color: inherit;
+  text-decoration: none;
+  display: block;
+  cursor: pointer;
+}
+
+.tocify .list-group-item:hover {
+  background-color: transparent;
+  color: #555;
+  border-left: 2px solid #aaa;
+}
+
+.tocify .list-group-item.active {
+  background-color: transparent;
+  color: #333;
+  border-left: 2px solid #555;
+  font-weight: 500;
+}
+
+.tocify .list-group-item {
+  background-color: transparent;
+  border: none;
+  padding: 2px 8px 2px 10px;
+  margin: 0;
+  display: inline-block;
+  color: #888;
+  border-left: 2px solid transparent;
+  margin-left: -1px;
+  cursor: pointer;
+  line-height: 1.3;
+  /* Text wrapping for long headers */
+  white-space: normal;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+/* Subheader indentation */
+.tocify-subheader .list-group-item {
+  padding-left: 5px;
+}
+
+p.caption {
+  margin: 0 10px 0 10px;
+  font-style: italic;
+  font-size: 90%;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center", out.width = "75%")
+```
+
+```{r libraries}
+suppressPackageStartupMessages({
+  library(GenomicRanges)
+  library(epiwraps)
+  library(ggplot2)
+  library(rGREAT) # Gene Ontology enrichment among genomic regions
+})
+```
+
+```{r}
+dir.create("data", showWarnings = FALSE)
+options(timeout = 6000)
+download.file(
+  url = "https://ethz-ins.org/content/clustering_assignment.zip",
+  destfile = "data/clustering.zip")
+unzip("data/clustering.zip", exdir = "data")
+```
+
+```{r}
+tracks <- list.files(path="data", pattern = ".bw$", full.names = TRUE)
+peaks <- lapply(list.files(path="data", pattern = ".bed$", full.names = TRUE), rtracklayer::import.bed)
+peaks <- lapply(peaks, FUN=function(x) x[x$score>800])
+# concat the individual regions to one GRanges object:
+regions_concat <- reduce(unlist(GRangesList(peaks)))
+```
+
+```{r}
+ese <- signal2Matrix(tracks, regions_concat, extend=2000)
+plotEnrichedHeatmaps(ese, cluster_rows = FALSE)
+```
+
+```{r}
+set.seed(42)
+cl2 <- clusterSignalMatrices(ese, k=2:10)
+ggplot(cl2$varExplained, aes(k, varExplained)) + geom_line()
+```
+
+```{r}
+rowData(ese)$cluster <- cl2$clusters[[4]]
+head(rowData(ese))
+```
+
+```{r}
+# color palette for 5 clusters:
+mycolors <-wesanderson::wes_palette("Royal2", 5)
+names(mycolors) <- c("1", "2", "3", "4", "5")
+plotEnrichedHeatmaps(ese, row_split="cluster", mean_color=mycolors, colors=c("white","darkred"))
+```
+
+```{r}
+d <- meltSignals(ese, splitBy=cl2$clusters[[4]])
+ggplot(d, aes(position, mean, colour=sample)) + geom_line(linewidth = 1.2) + facet_wrap(~split)
+```
+
+Cluster 2 and 3 look very similar, with slightly different magnitudes of the signal.
+This should be taken into consideration when doing other analyses and we could try clustering based on the scaled row data.
+The signals from Creb1 and Creb3L1 are pretty highly correlated, whereas Creb3 has a different pattern.
+
+```{r}
+split_regions <- split(rowRanges(ese), rowData(ese)$cluster)
+lengths(split_regions)
+
+res <- great(split_regions[["1"]], gene_sets="GO:BP", tss_source="hg38", 
+             background=regions_concat, cores=8)
+bp <- getEnrichmentTables(res)
+ggplot(head(bp,15), aes(fold_enrichment, reorder(description, p_adjust), 
+                        size=observed_region_hits, color=-log10(p_adjust))) + 
+  geom_point() + scale_color_viridis_c() +
+  scale_y_discrete(labels = function(x) stringr::str_wrap(x, width = 45)) +
+  ggtitle("Creb3 High - Cluster 1 vs all")
+```
+
+Cluster 1 with high Creb3 signal is enriched for terms related to responses to general stimuli as well as stress.
+Creb3 seems to be involved in communication and signaling as well.
+There is also an enriched proliferation/multicellular organisation pattern visible.
+This is somewhat in line with the [description](https://www.genecards.org/cgi-bin/carddisp.pl?gene=CREB3&keywords=creb3) of the protein, as it is ER bound and then cleaved in response to cellular stress
+which then allows it to translocate to the nucleus.
+
+
+```{r}
+res_2_3 <- great(split_regions[["2"]], gene_sets="GO:BP", tss_source="hg38", 
+             background=split_regions[["3"]], cores=4, verbose=FALSE)
+bp_2_3 <- getEnrichmentTables(res_2_3)
+nrow(bp_2_3)
+```
+
+When we check for biological processes that might be enriched between cluster 2 and 3, we find no significant terms.
+This is not surprising, as the two clusters look very similar in terms of their signal patterns and their difference might arise
+from technical artifacts.
+This could also be due to the small size of the sets of regions we are comparing in this case.
+We can try to compare the two clusters to the entire background of all regions.
+
+```{r}
+res_23 <- great(c(split_regions[["2"]], split_regions[["3"]], ignore.mcols=FALSE), gene_sets="GO:BP", tss_source="hg38", 
+             background=regions_concat, cores=4, verbose=FALSE)
+bp_23 <- getEnrichmentTables(res_23)
+
+ggplot(head(bp_23), aes(fold_enrichment, reorder(description, p_adjust), 
+                        size=observed_region_hits, color=-log10(p_adjust))) + 
+  geom_point() + scale_color_viridis_c() +
+  scale_y_discrete(labels = function(x) stringr::str_wrap(x, width = 45)) +
+  ggtitle("Cluster 2 and 3 vs all - Creb1 + Creb3L1 high")
+```
+
+When we compare cluster 2 and 3 to the entire background, we find some significant terms
+but they are not very specific.
+Multiple small gene sets related to germ cells seem to be enriched and there are also some terms related to RNA processing and translation.
