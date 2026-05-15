@@ -22,6 +22,11 @@ Alternatively:
 
 If it's about rlang and it still doesn’t work => install from source in the fresh session: install.packages("rlang", type = "source")
 
+## Error: UnableToOpenBlob when trying to plotEnrichedHeatmaps
+
+If you are on windows and this is accompanied by a warning, just before, saying "Failed to load cairo DLL", then you should try to build the Cairo package from source, i.e. `install.packages("Cairo", force=TRUE, type="source")`.
+Otherwise this could be simply a caching issue, and you should try, in the cogweel menu above the markdown, to "Clear all outputs" and restart in a fresh R session.
+
 ## With the same code, heatmaps look uglier than in class
 You probably are also having a message that you should install the `magick` R package. Just install that package, 
 (When plotting heatmaps with more data points than there are pixels to display them, the matrix needs to be rasterized and shrinked. The best way to do this is to use the imagemagick image manipulation library, which will be used if available. If not, some lousy alternative gets used instead.)
