@@ -27,11 +27,11 @@ ensdb <- ah[["AH89211"]] # mouse ensembldb object
 For this practical, we are going to re-use the hippocampus ATAC-seq data from week 5:
 
 ```{r, eval=FALSE}
-download.file("https://ethz-ins.org/content/mouse_mm38_hippocampus.peakCounts.SE.rds", "peakCounts.rds", mode="wb")
+download.file("https://ethz-ins.org/content/mouse_mm38_hippocampus.peakCounts.SE.rds", "data/peakCounts.rds", mode="wb")
 ```
 
 ```{r}
-se <- readRDS("peakCounts.rds")
+se <- readRDS("data/peakCounts.rds")
 ```
 
 The object contains fragment counts in peaks across control and stressed samples.

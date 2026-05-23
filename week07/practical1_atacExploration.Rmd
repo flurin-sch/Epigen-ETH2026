@@ -39,7 +39,7 @@ unzip("data/w7_bw.zip", exdir="data")
 
 ## Preparing tracks
 
-```{r}
+```{r, eval=FALSE}
 bam <- "data/atac.chr19.bam"
 
 # create a track using all fragments, computing the coverage at each position (and force Ensembl naming)

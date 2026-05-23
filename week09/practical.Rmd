@@ -19,16 +19,18 @@ Today we're going to work on ChIP-seq of 2 TFs and 2 histone modifications in a 
 
 ```{r, eval=FALSE}
 options(timeout = 6000)
-download.file("https://ethz-ins.org/content/clustering_practical.zip", "clustering_practical.zip")
-unzip("clustering_practical.zip")
+dir.create("data", showWarnings = FALSE)
+dir.create("data/clustering_practical", showWarnings = FALSE)
+download.file("https://ethz-ins.org/content/clustering_practical.zip", "data/clustering_practical.zip")
+unzip("data/clustering_practical.zip", exdir = "data/clustering_practical")
 list.files()
 ```
 
 ## Prepare the regions and the tracks
 
 ```{r}
-tracks <- list.files(pattern="bw$")
-regions <- rtracklayer::import.bed("regions.bed")
+tracks <- list.files(path="data/clustering_practical", pattern="bw$", full.names=TRUE)
+regions <- rtracklayer::import.bed("data/clustering_practical/regions.bed")
 ```
 
 ## Plot

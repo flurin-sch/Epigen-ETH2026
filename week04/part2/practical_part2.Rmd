@@ -54,7 +54,7 @@ Here are other ways of visualizing overlaps between peaks
 
 ```{r}
 # As a heatmap of overlaps:
-regionOverlaps(peaks)
+#regionOverlaps(peaks)
 # As an upset plot:
 tmp <- regionsToUpset(peaks, nsets=length(peaks))
 UpSet(make_comb_mat(regionsToUpset(peaks, nsets=length(peaks))))
